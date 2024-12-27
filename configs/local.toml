@@ -1,0 +1,60 @@
+api_address = ":17000"
+syncer_address = ":18000"
+monitor_address = ":19000"
+
+abi_decoder_address = "127.0.0.1:16000"
+abi_decoder_rpc = "http://127.0.0.1:16000/api"
+abi_node = "https://filfox.info/rpc/v1"
+
+mock_mode = false
+test_net = false
+dsn = "postgres://root:123456@127.0.0.1:5432/filscan_v2?connect_timeout=100&sslmode=disable&TimeZone=Asia/Shanghai&application_name=filscan_v2"
+
+syncer_task = true
+ip_task = true
+init_epoch = 2849395 #for Capital test
+
+
+[syncer]
+#enable_syncers = ["chain","actor","miner","fns","erc20"]
+enable_syncers = ["capital"]
+epochs_threshold = 1
+epochs_chunk = 1
+
+contract_so = "./bin/contract.so"
+
+[londobell]
+miner_agg_address = "http://127.0.0.1:1241"
+agg_address = "http://127.0.0.1:10010"
+adapter_address = "http://127.0.0.1:10011"
+
+[solidity]
+solc_select_path = "/Users/jinyu/Library/Python/3.8/bin//solc-select"
+solc_path = "/Users/jinyu/Library/Python/3.8/bin//solc"
+contracts_directory = "/Users/jinyu/Desktop/contracts/"
+
+[redis]
+redis_address = ":6379"
+max_idle = 30
+max_active = 30
+idle_timeout = 200
+
+[mail]
+client = "smtpdm.aliyun.com"
+port = 25
+username = ""
+password = ""
+
+[ali]
+call_client = "dyvmsapi.aliyuncs.com"
+msg_client = "dysmsapi.aliyuncs.com"
+msg_template_code = ""
+tts_code = ""
+access_key_id = ""
+access_key_secret = ""
+
+
+[pro]
+jwt_secret = "12345678"
+disable_sync_sector = false
+disable_sync_balance = false

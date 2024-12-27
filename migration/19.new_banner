@@ -1,0 +1,8 @@
+create table public.banner(
+    id  serial  not null primary key  ,
+    category varchar,
+    url varchar,
+    orders int,
+    language varchar,
+    link varchar
+);

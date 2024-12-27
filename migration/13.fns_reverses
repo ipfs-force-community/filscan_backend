@@ -1,0 +1,12 @@
+create table fns.reverses
+(
+    address varchar not null
+        primary key,
+    domain  varchar
+        unique,
+    epoch   bigint
+);
+
+create index reverses_epoch_index
+    on fns.reverses (epoch);
+

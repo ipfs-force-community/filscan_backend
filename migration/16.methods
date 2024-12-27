@@ -1,0 +1,9 @@
+CREATE TABLE fevm.methods(
+  "id" serial NOT NULL primary key,
+  "text_signature" text COLLATE "pg_catalog"."default",
+  "hex_signature" text COLLATE "pg_catalog"."default",
+  "decode" text COLLATE "pg_catalog"."default"
+);
+
+create index idx_fevm_methods_hex_sig
+    on fevm.methods (hex_signature);

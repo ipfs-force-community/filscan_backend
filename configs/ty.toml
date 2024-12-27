@@ -1,0 +1,48 @@
+api_address = ":17000"
+syncer_address = ":18000"
+
+abi_decoder_address = "127.0.0.1:16000"
+abi_decoder_rpc = "http://127.0.0.1:16000/api"
+abi_node = "http://127.0.0.1:1234/rpc/v1"
+
+mock_mode = false
+test_net = false
+
+dsn = "postgres://root:123456@127.0.0.1:5432/filscan_v2?connect_timeout=100&sslmode=disable&TimeZone=Asia/Shanghai&application_name=filscan_v2"
+
+syncer_task = true
+ip_task = false
+#init_epoch = 2685202 # opengate fns 事件初始高度
+
+
+solc_select_path = "/Users/jinyu/Library/Python/3.8/bin//solc-select"
+solc_path = "/Users/jinyu/Library/Python/3.8/bin//solc"
+solidity_versions = "/Users/jinyu/Library/Python/3.8/bin/contracts/solidity_versions"
+contracts_directory = "/Users/jinyu/Library/Python/3.8/bin/contracts/"
+
+[londobell]
+agg_address = "http://127.0.0.1:1237"
+adapter_address = "http://127.0.0.1:12345"
+
+miner_agg_address="http://127.0.0.1:1241"
+
+[syncer]
+#enable_syncers = ["opengate-fns", "chain", "actor", "erc20", "miner"]
+enable_syncers = ["pro"]
+epochs_threshold = 1
+epochs_chunk = 1
+
+[redis]
+redis_address = ":6379"
+max_idle = 30
+max_active = 30
+idle_timeout = 200
+
+[mail]
+client = "smtpdm.aliyun.com"
+port = 25
+username = ""
+password = ""
+
+[pro]
+jwt_secret = "12345678"
