@@ -23,7 +23,13 @@ jobs:
         go-version: '1.22'
 
     - name: dep
-      run: git submodule update --init --recursive
+      run: make dep
+
+    - name: Detect changes
+      run: |
+        go mod tidy
+        git status --porcelain
+        test -z "$(git status --porcelain)"
 
     - name: Build
       run: make build
