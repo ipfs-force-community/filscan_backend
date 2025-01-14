@@ -123,7 +123,7 @@ jobs:
 
       - name: Tar Release
         run: |
-          ll ./bin
+          ls ./bin
           tar -zcvf ./${{steps.vars.outputs.artifact_name}} ./bin
 
       - name: Rename bin file

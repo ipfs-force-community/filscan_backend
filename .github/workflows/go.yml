@@ -22,14 +22,14 @@ jobs:
       with:
         go-version: '1.22'
 
+    - name: dep
+      run: make dep
+
     - name: Detect changes
       run: |
         go mod tidy
         git status --porcelain
         test -z "$(git status --porcelain)"
-
-    - name: dep
-      run: make dep
 
     - name: Build
       run: make build
