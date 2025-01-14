@@ -41,6 +41,7 @@ jobs:
           export branch=$github_tag
           export git_message=$(git rev-list --format=%s --max-count=1 HEAD | tail +2)
           export repo_name=${GITHUB_REPOSITORY##*/}
+          export bin_name=${GITHUB_REPOSITORY##*/}
           export artifact_name=${GITHUB_REPOSITORY##*/}_$(git rev-parse --short HEAD).tar.gz
           export pub_method=pushTest
           export job_url=$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID
@@ -69,6 +70,7 @@ jobs:
           echo "::set-output name=github_tag::$github_tag"
           echo "::set-output name=git_message::$git_message"
           echo "::set-output name=repo_name::$repo_name"
+          echo "::set-output name=bin_name::$repo_name"
           echo "::set-output name=branch::$branch"
           echo "::set-output name=tag::$tag"
           echo "::set-output name=artifact_name::$artifact_name"
@@ -80,8 +82,7 @@ jobs:
 
       - name: show environment
         run: |
-          echo bin_name = ${{inputs.bin_name}}
-          echo has_ffi = ${{inputs.has_ffi}}
+          echo bin_name = ${{steps.vars.outputs.bin_name}}
           echo event = ${{github.event_name}}
           echo github_repository: $GITHUB_REPOSITORY
           echo vars.commit = ${{steps.vars.outputs.commit}}
@@ -122,7 +123,8 @@ jobs:
 
       - name: Tar Release
         run: |
-          tar -zcvf ./${{steps.vars.outputs.artifact_name}} ./${{inputs.bin_name}}
+          ll ./bin
+          tar -zcvf ./${{steps.vars.outputs.artifact_name}} ./bin
 
       - name: Rename bin file
         if: startsWith(github.ref, 'refs/tags/')
