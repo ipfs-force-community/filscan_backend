@@ -24,6 +24,9 @@ init:
 	go install github.com/google/wire/cmd/wire@latest
 	go install golang.org/x/tools/cmd/goimports@latest
 
+dep:
+	git submodule update --init --recursive
+
 build-api:
 	make generate
 	mkdir -p bin/ && go build --tags=bundle -ldflags "-X main.Version=$(VERSION) -X main.Name=filscan-api" -o ./bin/api ./cmd/filscan
