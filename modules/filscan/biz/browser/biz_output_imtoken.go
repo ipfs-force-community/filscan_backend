@@ -198,11 +198,10 @@ func (i IMTokenBiz) ChainMessages(ctx context.Context, req filscan.ChainMessages
 	if err != nil || transfers == nil {
 		return
 	}
-	var transferList []*filscan.MessageBasic
-	if transfers != nil {
-		transferList = transfers.TracesByAccountIDList
-	}
+	transferList := transfers.TracesByAccountIDList
+
 	cidMethod := make(map[string]string)
+	uniq := make(map[string]struct{})
 	var runners []parallel.Runner[filscan.MessageByCidResponse]
 	for _, transfer := range transferList {
 		cid := transfer.Cid
@@ -216,7 +215,10 @@ func (i IMTokenBiz) ChainMessages(ctx context.Context, req filscan.ChainMessages
 	ch := parallel.Run[filscan.MessageByCidResponse](ctx, 50, runners)
 	err = parallel.Wait[filscan.MessageByCidResponse](ch, func(v filscan.MessageByCidResponse) error {
 		if v.Message != nil {
-			resp.MessageList = append(resp.MessageList, v.Message)
+			if _, ok := uniq[v.Message.Cid]; !ok {
+				uniq[v.Message.Cid] = struct{}{}
+				resp.MessageList = append(resp.MessageList, v.Message)
+			}
 		}
 		return nil
 	})
@@ -239,7 +241,7 @@ func (i IMTokenBiz) ChainMessages(ctx context.Context, req filscan.ChainMessages
 		}
 	}
 	for index := 1; index < len(resp.MessageList); index++ {
-		//给每个消息打标签，避免通过cid找消息将recieve这种变成了send
+		//给每个消息打标签，避免通过cid找消息将receive这种变成了send
 		messageIMToken := resp.MessageList[index]
 		if messageIMToken.Cid != "" {
 			messageIMToken.Method = cidMethod[messageIMToken.Cid]
