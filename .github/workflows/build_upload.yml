@@ -117,13 +117,13 @@ jobs:
       - name: Build
         run: |
           go clean --modcache && make dep
-          make build && mkdir mainnet && cp bin/* mainnet
-          make build-calib && mkdir calibnet && cp bin/* calibnet
+          make build && mkdir mainnet && mv bin/* mainnet
+          make build-calib && mkdir calibnet && mv bin/* calibnet
           mv mainnet bin && mv calibnet bin
 
       - name: Tar Release
         run: |
-          ls ./bin
+          ls ./bin/*
           tar -zcvf ./${{steps.vars.outputs.artifact_name}} ./bin
 
       - name: Rename bin file
