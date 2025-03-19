@@ -4,6 +4,13 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
+	"os"
+	"regexp"
+	"strconv"
+	"strings"
+	"time"
+
 	"github.com/gogo/protobuf/types"
 	"github.com/hashicorp/go-version"
 	filscan "gitlab.forceup.in/fil-data-factory/filscan-backend/api"
@@ -17,12 +24,6 @@ import (
 	"gitlab.forceup.in/fil-data-factory/filscan-backend/pkg/londobell"
 	"gitlab.forceup.in/fil-data-factory/filscan-backend/utils/_dal"
 	"gorm.io/gorm"
-	"io"
-	"os"
-	"regexp"
-	"strconv"
-	"strings"
-	"time"
 )
 
 func NewVerifyContract(agg londobell.Agg, adapter londobell.Adapter, db *gorm.DB, conf *config.Config) *VerifyContractBiz {
@@ -478,8 +479,10 @@ func (v VerifyContractBiz) VerifyHardhatContract(ctx context.Context, request fi
 func (v VerifyContractBiz) VerifyContract(ctx context.Context, request filscan.VerifyContractRequest) (resp filscan.VerifyContractResponse, err error) {
 	target := "" //target可以直接从Metadata中获取，也可以从编译后的主合约中获取（用于快速定位是编译哪个合约及找到hardhat是哪个Metadata）
 	input := strings.TrimSpace(request.ContractAddress)
+	log.Infof("input address: %s", input)
 	checkIsVerified, err := v.checkIsVerified(ctx, input)
 	if err != nil {
+		err = fmt.Errorf("check %s is verified error: %s", input, err.Error())
 		return
 	}
 	if checkIsVerified != nil {
@@ -487,9 +490,11 @@ func (v VerifyContractBiz) VerifyContract(ctx context.Context, request filscan.V
 		resp.CompiledFile = checkIsVerified
 		return
 	}
+	log.Infof("get actor %s", input)
 	var actor *contract.OnChainActor
 	actor, err = v.GetOnChainActor(ctx, input)
 	if err != nil {
+		err = fmt.Errorf("tet actor % s error: %s", input, err.Error())
 		return
 	}
 	var actorID, actorAddress, ethAddress, initCode string
@@ -520,6 +525,7 @@ func (v VerifyContractBiz) VerifyContract(ctx context.Context, request filscan.V
 		err = fmt.Errorf("please input a solidity file")
 		return
 	}
+	log.Info("check metadata file")
 	var metaDataFile *contract.SourceFile
 	var isMetaData bool
 	if request.MateDataFile != nil {
@@ -531,7 +537,7 @@ func (v VerifyContractBiz) VerifyContract(ctx context.Context, request filscan.V
 		var tmpMetadata contract.MetaData
 		err = json.Unmarshal([]byte(request.MateDataFile.SourceCode), &tmpMetadata)
 		if err != nil || tmpMetadata.Sources == nil {
-			err = fmt.Errorf("metadata file parse error")
+			err = fmt.Errorf("metadata file parse error: %v", err)
 			return
 		}
 		for _, v := range tmpMetadata.Settings.CompilationTarget {
@@ -543,6 +549,7 @@ func (v VerifyContractBiz) VerifyContract(ctx context.Context, request filscan.V
 	var solidity *contract.Solidity
 	solidity, err = contract.NewSolidity(*solcPath)
 	if err != nil {
+		err = fmt.Errorf("new solidity error: %s", err.Error())
 		return
 	}
 
@@ -565,10 +572,12 @@ func (v VerifyContractBiz) VerifyContract(ctx context.Context, request filscan.V
 		targetVersion = matches[0]
 	}
 
+	log.Info("compile contract")
 	var compiledContracts []*contract.CompiledFile
 	compiledContracts, err = v.compileContract(compiler, targetVersion, sourceFile, metaDataFile, fileDir)
 	if err != nil {
 		resp.IsVerified = false
+		err = fmt.Errorf("compile contract error: %s", err.Error())
 		return
 	}
 
@@ -579,11 +588,13 @@ func (v VerifyContractBiz) VerifyContract(ctx context.Context, request filscan.V
 		var comparedVersion *version.Version
 		comparedVersion, err = version.NewVersion(oldVersion)
 		if err != nil {
+			err = fmt.Errorf("old version(%s) error: %s", oldVersion, err.Error())
 			return
 		}
 		var inputVersion *version.Version
 		inputVersion, err = version.NewVersion(targetVersion)
 		if err != nil {
+			err = fmt.Errorf("target version(%s) error: %s", targetVersion, err.Error())
 			return
 		}
 		//todo 如果有目标target，就直接根据target去找，否则遍历。有target的时候，comparedContracts只返回一个
@@ -635,6 +646,7 @@ func (v VerifyContractBiz) VerifyContract(ctx context.Context, request filscan.V
 			})
 		}
 
+		log.Info("save contract to db")
 		tx := v.db.Begin()
 		ctx = _dal.ContextWithDB(context.Background(), tx)
 		defer func() {
@@ -703,35 +715,37 @@ func (v VerifyContractBiz) compileContract(compiler *contract.Compiler, targetVe
 	solcSelectPath := *v.config.Solidity.SolcSelectPath
 	err = compiler.ChangeVersion(solcSelectPath, targetVersion)
 	if err != nil {
+		err = fmt.Errorf("change version(%s) error: %v", targetVersion, err)
 		return
 	}
 	if metaDataFile == nil {
 		compiledFiles, err = compiler.CompileSourceFile(files, fileDir)
 		if err != nil {
-			//err = fmt.Errorf("the input source files couldn't be compiled")
+			err = fmt.Errorf("the input source files couldn't be compiled: %v", err)
 			return
 		}
 	} else {
 		var metaData contract.MetaData
 		metaData, err = compiler.CreatedMateDataFile(*metaDataFile)
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("created metadata file error: %v", err)
 		}
 		metaDataVersion := regexp.MustCompile(`[0-9]+\.[0-9]+\.[0-9]+`).FindStringSubmatch(metaData.Compiler.Version)
 		if metaDataVersion[0] != targetVersion {
-			err = fmt.Errorf("input compiler version is different from the metadata compiler version")
+			err = fmt.Errorf("input compiler version %s is different from the metadata compiler version %s",
+				targetVersion, metaDataVersion[0])
 			return
 		}
 
 		if metaData.Settings.Optimizer != nil { //Metadata使用了优化情况
 			if metaData.Settings.Optimizer.Enabled != compiler.Optimize.Enabled {
-				err = fmt.Errorf("input optimize setting is different from the metadata optimize setting")
+				err = fmt.Errorf("input optimize setting(enabled) is different from the metadata optimize setting")
 				return
 			}
 			// optimizer.enable可以为false，但run为200。因为Enabled只对run有影响，对detail没影响。所以可以enable为false但是detail有
 			//这里只是用来判断参数不匹配情况，编译器只需要参数就好
 			if metaData.Settings.Optimizer.Enabled && metaData.Settings.Optimizer.Runs != compiler.Optimize.Runs {
-				err = fmt.Errorf("input optimize setting is different from the metadata optimize setting")
+				err = fmt.Errorf("input optimize setting(runs) is different from the metadata optimize setting")
 				return
 			}
 		} else {
@@ -743,7 +757,7 @@ func (v VerifyContractBiz) compileContract(compiler *contract.Compiler, targetVe
 		}
 		compiledFiles, err = compiler.CompileWithMetaData(files, metaData, fileDir)
 		if err != nil {
-			//err = fmt.Errorf("the input source files couldn't be compiled")
+			err = fmt.Errorf("compile with metadata error: %v", err)
 			return
 		}
 	}
