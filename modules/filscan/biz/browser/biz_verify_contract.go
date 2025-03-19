@@ -480,6 +480,7 @@ func (v VerifyContractBiz) VerifyContract(ctx context.Context, request filscan.V
 	target := "" //target可以直接从Metadata中获取，也可以从编译后的主合约中获取（用于快速定位是编译哪个合约及找到hardhat是哪个Metadata）
 	input := strings.TrimSpace(request.ContractAddress)
 	log.Infof("input address: %s", input)
+	log.Infof("request: %#v", request)
 	checkIsVerified, err := v.checkIsVerified(ctx, input)
 	if err != nil {
 		err = fmt.Errorf("check %s is verified error: %s", input, err.Error())
@@ -510,6 +511,7 @@ func (v VerifyContractBiz) VerifyContract(ctx context.Context, request filscan.V
 		err = fmt.Errorf("can't find the input address %s, maybe it have not created a contract yet", input)
 		return
 	}
+	log.Infof("init code: %s", initCode)
 
 	fileDir := *v.config.Solidity.ContractDirectory + strconv.FormatUint(uint64(time.Now().Unix()), 10) + "/"
 	var sourceFile []contract.SourceFile
@@ -525,7 +527,7 @@ func (v VerifyContractBiz) VerifyContract(ctx context.Context, request filscan.V
 		err = fmt.Errorf("please input a solidity file")
 		return
 	}
-	log.Info("check metadata file")
+	log.Info("check metadata file, request metadata: %+v", request.MateDataFile)
 	var metaDataFile *contract.SourceFile
 	var isMetaData bool
 	if request.MateDataFile != nil {
@@ -543,6 +545,8 @@ func (v VerifyContractBiz) VerifyContract(ctx context.Context, request filscan.V
 		for _, v := range tmpMetadata.Settings.CompilationTarget {
 			target = v
 		}
+		log.Infof("targets: %s", tmpMetadata.Settings.CompilationTarget)
+		log.Infof("target: %s", target)
 	}
 
 	solcPath := v.config.Solidity.SolcPath
@@ -572,7 +576,7 @@ func (v VerifyContractBiz) VerifyContract(ctx context.Context, request filscan.V
 		targetVersion = matches[0]
 	}
 
-	log.Info("compile contract")
+	log.Info("compile contract, target version: %s", targetVersion)
 	var compiledContracts []*contract.CompiledFile
 	compiledContracts, err = v.compileContract(compiler, targetVersion, sourceFile, metaDataFile, fileDir)
 	if err != nil {
@@ -597,6 +601,7 @@ func (v VerifyContractBiz) VerifyContract(ctx context.Context, request filscan.V
 			err = fmt.Errorf("target version(%s) error: %s", targetVersion, err.Error())
 			return
 		}
+		log.Infof("compared version: %s, input version: %s", comparedVersion, inputVersion)
 		//todo 如果有目标target，就直接根据target去找，否则遍历。有target的时候，comparedContracts只返回一个
 		if inputVersion.GreaterThan(comparedVersion) {
 			comparedContracts = contract.CompareByteCodeWithTarget(compiledContracts, initCode, target)
@@ -760,6 +765,12 @@ func (v VerifyContractBiz) compileContract(compiler *contract.Compiler, targetVe
 			err = fmt.Errorf("compile with metadata error: %v", err)
 			return
 		}
+	}
+	for i, cf := range compiledFiles {
+		log.Infof("compiled file %d: %s", i, cf.ContractName)
+		log.Infof("compiled file %d: %s", i, cf.ByteCode)
+		log.Infof("compiled file %d: %s", i, cf.ABI)
+		log.Infof("compiled file %d: %s", i, cf.ContractFile)
 	}
 
 	return

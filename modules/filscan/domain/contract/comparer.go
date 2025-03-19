@@ -4,14 +4,20 @@ import "strings"
 
 func CompareByteCodeWithTarget(compiledContracts []*CompiledFile, initCode string, target string) (comparedContracts []*CompiledFile) {
 	initCodeNoCBOR := RemoveCBORCode(initCode)
+	compilerLog.Infof("initCodeNoCBOR:%s", initCodeNoCBOR)
 	if target != "" {
 		for _, compiledContract := range compiledContracts {
 			if compiledContract.ContractName == target {
 				byteCodeNoCBOR := RemoveCBORCode(compiledContract.ByteCode)
+				compilerLog.Infof("%v %v %v", len(initCodeNoCBOR), len(byteCodeNoCBOR), byteCodeNoCBOR != compiledContract.ByteCode)
 				if len(initCodeNoCBOR) >= len(byteCodeNoCBOR) && byteCodeNoCBOR != compiledContract.ByteCode {
 					argumentsCode := initCodeNoCBOR[len(byteCodeNoCBOR):]
 					compareCode := initCodeNoCBOR[:len(byteCodeNoCBOR)]
+					compilerLog.Infof("compareCode1: %s", compareCode)
 					compareCode, byteCodeNoCBOR = RemovePlaceholderCode(compareCode, byteCodeNoCBOR)
+
+					compilerLog.Infof("compareCode:%s", compareCode)
+					compilerLog.Infof("byteCodeNoCBOR:%s", byteCodeNoCBOR)
 					if compareCode == byteCodeNoCBOR {
 						compiledContract.Arguments = argumentsCode
 						compiledContract.IsMainContract = true
@@ -24,10 +30,15 @@ func CompareByteCodeWithTarget(compiledContracts []*CompiledFile, initCode strin
 	} else {
 		for _, compiledContract := range compiledContracts {
 			byteCodeNoCBOR := RemoveCBORCode(compiledContract.ByteCode)
+			compilerLog.Infof("%v %v %v", len(initCodeNoCBOR), len(byteCodeNoCBOR), byteCodeNoCBOR != compiledContract.ByteCode)
 			if len(initCodeNoCBOR) >= len(byteCodeNoCBOR) && byteCodeNoCBOR != compiledContract.ByteCode {
 				argumentsCode := initCodeNoCBOR[len(byteCodeNoCBOR):]
 				compareCode := initCodeNoCBOR[:len(byteCodeNoCBOR)]
+				compilerLog.Infof("compareCode1: %s", compareCode)
 				compareCode, byteCodeNoCBOR = RemovePlaceholderCode(compareCode, byteCodeNoCBOR)
+
+				compilerLog.Infof("compareCode:%s", compareCode)
+				compilerLog.Infof("byteCodeNoCBOR:%s", byteCodeNoCBOR)
 				if compareCode == byteCodeNoCBOR {
 					compiledContract.Arguments = argumentsCode
 					compiledContract.IsMainContract = true
