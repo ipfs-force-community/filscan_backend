@@ -38,6 +38,8 @@ var (
 	UpgradeDragonHeight     = chain.Epoch(build.UpgradeDragonHeight)
 	UpgradeWaffleHeight     = chain.Epoch(build.UpgradeWaffleHeight)
 	UpgradeTuktukHeight     = chain.Epoch(buildconstants.UpgradeTuktukHeight)
+	UpgradeTeepHeight       = chain.Epoch(buildconstants.UpgradeTeepHeight)
+	UpgradeTockHeight       = chain.Epoch(buildconstants.UpgradeTockHeight)
 	VersionMap              = map[int64]network.Version{
 		GENESIS:                         network.Version0,
 		BREEZE:                          network.Version1,
@@ -64,6 +66,8 @@ var (
 		UpgradeDragonHeight.Int64():     network.Version22,
 		UpgradeWaffleHeight.Int64():     network.Version23,
 		UpgradeTuktukHeight.Int64():     network.Version24,
+		UpgradeTeepHeight.Int64():       network.Version25,
+		UpgradeTockHeight.Int64():       network.Version26,
 	}
 )
 
@@ -72,7 +76,7 @@ func NetworkVersionFromEpoch(epoch chain.Epoch) (targetVersion network.Version) 
 		GENESIS, BREEZE, SMOKE, IGNITION, REFUEL, TAPE, KUMQUAT, CALICO, PERSIAN, ORANGE, TRUST, NORWEGIAN, TURBO,
 		HYPERDRIVE, CHOCOLATE, OHSNAP, SKYR, SHARK, HYGGE, LIGHTNING.Int64(), THUNDER.Int64(),
 		UpgradeWatermelonHeight.Int64(), UpgradeDragonHeight.Int64(), UpgradeWaffleHeight.Int64(),
-		UpgradeTuktukHeight.Int64(),
+		UpgradeTuktukHeight.Int64(), UpgradeTeepHeight.Int64(), UpgradeTockHeight.Int64(),
 	}
 
 	index := sort.Search(len(VersionList), func(i int) bool { return VersionList[i] > epoch.Int64() }) - 1 // 使用二分查找算法查找区间索引
