@@ -3,9 +3,6 @@ package contract
 import (
 	"bytes"
 	"fmt"
-	"github.com/ethereum/go-ethereum/common/compiler"
-	json "github.com/nikkolasg/hexjson"
-	"gitlab.forceup.in/fil-data-factory/filscan-backend/modules/common/config"
 	"io"
 	"os"
 	"os/exec"
@@ -14,7 +11,14 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/ethereum/go-ethereum/common/compiler"
+	logging "github.com/gozelle/logger"
+	json "github.com/nikkolasg/hexjson"
+	"gitlab.forceup.in/fil-data-factory/filscan-backend/modules/common/config"
 )
+
+var compilerLog = logging.NewLogger("compiler")
 
 type Compiler struct {
 	Solidity   *Solidity
@@ -348,6 +352,7 @@ func (c *Compiler) CompileWithMetaData(sourceFile []SourceFile, metaData MetaDat
 			return
 		}
 	}
+	compilerLog.Info("get default output selection")
 	outputSelection, err := GetDefaultOutputSelection()
 	if err != nil {
 		return
@@ -395,12 +400,14 @@ func (c *Compiler) CompileWithMetaData(sourceFile []SourceFile, metaData MetaDat
 				}
 				err = c.CreatedSourceFile(file)
 				if err != nil {
+					compilerLog.Errorf("CreatedSourceFile %v error: %v", file, err)
 					return
 				}
 				savedSourceFile = append(savedSourceFile, file)
 			}
 			compiledFiles, err = c.CompileSavedFiles(savedSourceFile, fileDir)
 			if err != nil {
+				compilerLog.Errorf("compile saved files error: %v", err)
 				return
 			}
 		}
@@ -415,6 +422,7 @@ func (c *Compiler) CompileSavedFiles(savedFiles []SourceFile, fileDir string) (c
 		var compileResult map[string]*compiler.Contract
 		compileResult, err = c.Compile(file, fileDir) //合约名字 -》 合约内容结构体  一个map
 		if err != nil {
+			err = fmt.Errorf("compile error: %v", err)
 			return
 		}
 		for key, value := range compileResult {
