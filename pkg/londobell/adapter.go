@@ -160,10 +160,12 @@ type MinerDetail struct {
 }
 
 type ChainMinerState struct {
-	Info                       cid.Cid
-	PreCommitDeposits          decimal.Decimal
-	LockedFunds                decimal.Decimal
-	VestingFunds               cid.Cid
+	Info              cid.Cid
+	PreCommitDeposits decimal.Decimal
+	LockedFunds       decimal.Decimal
+	// 类型变了: 15 -> 16 : cid -> *VestingFunds
+	// ...
+	// VestingFunds               cid.Cid
 	FeeDebt                    decimal.Decimal
 	InitialPledge              decimal.Decimal
 	PreCommittedSectors        cid.Cid
