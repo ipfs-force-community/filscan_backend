@@ -14,6 +14,7 @@ import (
 	"gitlab.forceup.in/fil-data-factory/filscan-backend/modules/filscan/assembler"
 	"gitlab.forceup.in/fil-data-factory/filscan-backend/modules/filscan/domain/interval"
 	"gitlab.forceup.in/fil-data-factory/filscan-backend/pkg/chain"
+	"gitlab.forceup.in/fil-data-factory/filscan-backend/pkg/debuglog"
 	"gitlab.forceup.in/fil-data-factory/filscan-backend/pkg/londobell"
 	"gitlab.forceup.in/fil-data-factory/filscan-backend/types"
 	"gorm.io/gorm"
@@ -88,6 +89,10 @@ func (m MinerInfoBiz) GetMinerIpAddress(ctx context.Context, addr chain.SmartAdd
 }
 
 func (m MinerInfoBiz) GetMinerIndicator(ctx context.Context, addr chain.SmartAddress, interval *types.IntervalType) (result *filscan.MinerIndicators, err error) {
+	defer func() {
+		debuglog.Logger.Info("result", result, err, addr)
+	}()
+
 	tipset, err := m.agg.LatestTipset(ctx)
 	if err != nil {
 		return nil, err
