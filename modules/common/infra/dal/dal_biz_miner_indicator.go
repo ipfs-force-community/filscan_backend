@@ -194,6 +194,7 @@ from (select sum(r.block_count) AS acc_block_count,
 		Find(&newAccIndicators).Error
 	if err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
+			logger.Warnf("fail to get acc indicators of miner %s: %w", ID, err)
 			return nil, nil
 		}
 		return

@@ -206,6 +206,8 @@ func (m MinerInfoBiz) GetMinerIndicator(ctx context.Context, addr chain.SmartAdd
 		} else {
 			windowPoStGasPerTB = windowPoStGas.Div(endMinerInfo.Power.Div(chain.PerT))
 		}
+	} else {
+		log.Warnf("fail to get acc indicators of miner %s", addr)
 	}
 
 	newMinerIndicator := filscan.MinerIndicators{
