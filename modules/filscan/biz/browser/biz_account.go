@@ -477,6 +477,7 @@ func (a AccountBiz) IndicatorsByAccountID(ctx context.Context, req filscan.Indic
 	defer func() {
 		debuglog.Logger.Info("resp", resp, err)
 	}()
+	debuglog.Logger.Infof("IndicatorsByAccountID req: %v", req)
 
 	cacheKey, err := a.Redis.HexCacheKey(ctx, req)
 	if err != nil {
@@ -521,6 +522,7 @@ func (a AccountBiz) IndicatorsByAccountID(ctx context.Context, req filscan.Indic
 		if req.Filters.Interval != nil {
 			accountInterval = req.Filters.Interval
 		}
+		debuglog.Logger.Infof("accountInterval: %v, accountID: %v", accountInterval, accountID)
 		if accountBasic.OwnedMiners != nil {
 			var ownerIndicator *filscan.MinerIndicators
 			ownerIndicator, err = a.OwnerInfoBiz.GetOwnerIndicator(ctx, accountID, accountInterval)

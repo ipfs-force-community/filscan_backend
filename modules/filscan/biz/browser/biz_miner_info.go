@@ -107,6 +107,7 @@ func (m MinerInfoBiz) GetMinerIndicator(ctx context.Context, addr chain.SmartAdd
 	if err != nil {
 		return
 	}
+	debuglog.Logger.Infof("miner %s info: %+v", addr, endMinerInfo)
 
 	minerInfoDal := dal.NewMinerInfoBizDal(m.db)
 	var startMinerInfo *bo.MinerInfo
