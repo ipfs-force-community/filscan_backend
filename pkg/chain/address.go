@@ -15,11 +15,13 @@ func init() {
 }
 
 func RegisterNet(testNet bool) {
+	fmt.Println("RegisterNet", testNet, "address.CurrentNetwork", address.CurrentNetwork)
 	if testNet {
 		address.CurrentNetwork = address.Testnet
 	} else {
 		address.CurrentNetwork = address.Mainnet
 	}
+	fmt.Println("RegisterNet", testNet, "address.CurrentNetwork", address.CurrentNetwork)
 }
 
 var (
