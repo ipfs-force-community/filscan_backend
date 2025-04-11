@@ -10,6 +10,7 @@ import (
 	"gitlab.forceup.in/fil-data-factory/filscan-backend/modules/common/infra/po"
 	"gitlab.forceup.in/fil-data-factory/filscan-backend/modules/filscan/domain/actor"
 	"gitlab.forceup.in/fil-data-factory/filscan-backend/pkg/chain"
+	"gitlab.forceup.in/fil-data-factory/filscan-backend/pkg/debuglog"
 	"gitlab.forceup.in/fil-data-factory/filscan-backend/types"
 	"gitlab.forceup.in/fil-data-factory/filscan-backend/utils/_dal"
 	"gorm.io/gorm"
@@ -131,6 +132,10 @@ func (o MinerIndicatorBizDal) GetMinerIndicator(ctx context.Context, ID actor.Id
 }
 
 func (o MinerIndicatorBizDal) GetMinerAccIndicators(ctx context.Context, ID actor.Id, interval *types.IntervalType) (accIndicators *bo.AccIndicators, err error) {
+	defer func() {
+		debuglog.Logger.Info("accIndicators", accIndicators, err, ID)
+	}()
+
 	tx, err := o.DB(ctx)
 	if err != nil {
 		return
@@ -192,8 +197,11 @@ from (select sum(r.block_count) AS acc_block_count,
         and miner = ?) c
 `, startEpoch.Int64(), endEpoch, ID, startEpoch.Int64(), endEpoch, ID, startEpoch.Int64(), endEpoch, ID).
 		Find(&newAccIndicators).Error
+
+	debuglog.Logger.Info("newAccIndicators", newAccIndicators, err, ID)
 	if err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
+			logger.Warnf("fail to get acc indicators of miner %s: %w", ID, err)
 			return nil, nil
 		}
 		return

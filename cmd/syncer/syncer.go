@@ -74,7 +74,6 @@ func newApp(conf *config.Config, adapter londobell.Adapter, sy *syncer.Manager,
 
 	var err error
 	if conf.TestNet {
-		chain.RegisterNet(conf.TestNet)
 		var r *londobell.EpochReply
 		r, err = adapter.Epoch(context.Background(), nil)
 		if err != nil {
@@ -82,6 +81,7 @@ func newApp(conf *config.Config, adapter londobell.Adapter, sy *syncer.Manager,
 		}
 		chain.RegisterBaseTime(r.Epoch, r.BlockTime)
 	}
+	chain.RegisterNet(conf.TestNet)
 
 	// 同步补全 actor 创建时间
 	if conf.UpdateCreateTime {

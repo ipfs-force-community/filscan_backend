@@ -8,6 +8,7 @@ import (
 	"sort"
 	"time"
 
+	"github.com/filecoin-project/go-address"
 	"github.com/filecoin-project/go-state-types/builtin"
 	logging "github.com/gozelle/logger"
 	"github.com/gozelle/mix"
@@ -19,6 +20,7 @@ import (
 	"gitlab.forceup.in/fil-data-factory/filscan-backend/modules/syncer"
 	"gitlab.forceup.in/fil-data-factory/filscan-backend/pkg/chain"
 	"gitlab.forceup.in/fil-data-factory/filscan-backend/pkg/chain/upgrader"
+	"gitlab.forceup.in/fil-data-factory/filscan-backend/pkg/debuglog"
 	"gitlab.forceup.in/fil-data-factory/filscan-backend/pkg/londobell"
 )
 
@@ -103,6 +105,7 @@ func (m MinerInfoTask) Exec(ctx *syncer.Context) (err error) {
 		}
 		return
 	}
+	debuglog.Logger.Infof("获取 miner infos 数据成功, epoch: %d, miner count: %d, miner: %v", ctx.Epoch(), len(infos), infos[0].Miner.Address())
 
 	var totalPower decimal.Decimal
 	if !m.GapScan {
@@ -324,6 +327,7 @@ func (m MinerInfoTask) ToOwnerInfoPo(e chain.Epoch, o chain.SmartAddress, source
 }
 
 func (m MinerInfoTask) ToMinerInfoPo(source *londobell.MinerInfo, totalPower decimal.Decimal) (target *po.MinerInfo, err error) {
+	debuglog.Logger.Infof("to miner info, epoch: %d, miner: %s, address type: %v", source.Epoch, source.Miner.Address(), address.CurrentNetwork)
 	target = &po.MinerInfo{
 		Epoch:                source.Epoch,
 		Miner:                source.Miner.Address(),

@@ -14,6 +14,7 @@ import (
 	"gitlab.forceup.in/fil-data-factory/filscan-backend/modules/filscan/assembler"
 	"gitlab.forceup.in/fil-data-factory/filscan-backend/modules/filscan/domain/interval"
 	"gitlab.forceup.in/fil-data-factory/filscan-backend/pkg/chain"
+	"gitlab.forceup.in/fil-data-factory/filscan-backend/pkg/debuglog"
 	"gitlab.forceup.in/fil-data-factory/filscan-backend/pkg/londobell"
 	"gitlab.forceup.in/fil-data-factory/filscan-backend/types"
 	"gorm.io/gorm"
@@ -88,6 +89,10 @@ func (m MinerInfoBiz) GetMinerIpAddress(ctx context.Context, addr chain.SmartAdd
 }
 
 func (m MinerInfoBiz) GetMinerIndicator(ctx context.Context, addr chain.SmartAddress, interval *types.IntervalType) (result *filscan.MinerIndicators, err error) {
+	defer func() {
+		debuglog.Logger.Info("result", result, err, addr)
+	}()
+
 	tipset, err := m.agg.LatestTipset(ctx)
 	if err != nil {
 		return nil, err
@@ -102,6 +107,7 @@ func (m MinerInfoBiz) GetMinerIndicator(ctx context.Context, addr chain.SmartAdd
 	if err != nil {
 		return
 	}
+	debuglog.Logger.Infof("miner %s info: %+v", addr, endMinerInfo)
 
 	minerInfoDal := dal.NewMinerInfoBizDal(m.db)
 	var startMinerInfo *bo.MinerInfo
@@ -206,6 +212,8 @@ func (m MinerInfoBiz) GetMinerIndicator(ctx context.Context, addr chain.SmartAdd
 		} else {
 			windowPoStGasPerTB = windowPoStGas.Div(endMinerInfo.Power.Div(chain.PerT))
 		}
+	} else {
+		log.Warnf("fail to get acc indicators of miner %s", addr)
 	}
 
 	newMinerIndicator := filscan.MinerIndicators{

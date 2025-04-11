@@ -29,6 +29,7 @@ import (
 	"gitlab.forceup.in/fil-data-factory/filscan-backend/modules/filscan/acl"
 	"gitlab.forceup.in/fil-data-factory/filscan-backend/modules/filscan/assembler"
 	"gitlab.forceup.in/fil-data-factory/filscan-backend/pkg/chain"
+	"gitlab.forceup.in/fil-data-factory/filscan-backend/pkg/debuglog"
 	"gitlab.forceup.in/fil-data-factory/filscan-backend/pkg/londobell"
 	"gitlab.forceup.in/fil-data-factory/filscan-backend/pkg/redis"
 	"gitlab.forceup.in/fil-data-factory/filscan-backend/types"
@@ -473,6 +474,11 @@ func (a AccountBiz) AccountOwnerByID(ctx context.Context, req filscan.AccountOwn
 }
 
 func (a AccountBiz) IndicatorsByAccountID(ctx context.Context, req filscan.IndicatorsByAccountIDRequest) (resp filscan.IndicatorsByAccountIDResponse, err error) {
+	defer func() {
+		debuglog.Logger.Info("resp", resp, err)
+	}()
+	debuglog.Logger.Infof("IndicatorsByAccountID req: %v", req)
+
 	cacheKey, err := a.Redis.HexCacheKey(ctx, req)
 	if err != nil {
 		return
@@ -516,6 +522,7 @@ func (a AccountBiz) IndicatorsByAccountID(ctx context.Context, req filscan.Indic
 		if req.Filters.Interval != nil {
 			accountInterval = req.Filters.Interval
 		}
+		debuglog.Logger.Infof("accountInterval: %v, accountID: %v", accountInterval, accountID)
 		if accountBasic.OwnedMiners != nil {
 			var ownerIndicator *filscan.MinerIndicators
 			ownerIndicator, err = a.OwnerInfoBiz.GetOwnerIndicator(ctx, accountID, accountInterval)
