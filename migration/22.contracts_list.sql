@@ -1,0 +1,1 @@
+alter table fevm.erc20_contract add url varchar;
