@@ -10,6 +10,7 @@ import (
 	v14 "gitlab.forceup.in/fil-data-factory/filscan-backend/pkg/chain/upgrader/message_detail/v14"
 	v15 "gitlab.forceup.in/fil-data-factory/filscan-backend/pkg/chain/upgrader/message_detail/v15"
 	v16 "gitlab.forceup.in/fil-data-factory/filscan-backend/pkg/chain/upgrader/message_detail/v16"
+	v17 "gitlab.forceup.in/fil-data-factory/filscan-backend/pkg/chain/upgrader/message_detail/v17"
 	v8 "gitlab.forceup.in/fil-data-factory/filscan-backend/pkg/chain/upgrader/message_detail/v8"
 	v9 "gitlab.forceup.in/fil-data-factory/filscan-backend/pkg/chain/upgrader/message_detail/v9"
 )
@@ -71,6 +72,11 @@ func DecodeParamsFromVersion(epoch chain.Epoch, params interface{}, methodName s
 		}
 	case 16:
 		ParamsResult, err = v16.DecodeMessageParams(params, methodName)
+		if err != nil {
+			return
+		}
+	case 17:
+		ParamsResult, err = v17.DecodeMessageParams(params, methodName)
 		if err != nil {
 			return
 		}
