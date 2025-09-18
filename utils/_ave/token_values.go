@@ -42,14 +42,6 @@ func (t *timerCache) Set(contactID string, exchange ExchangeInfo, cacheTime time
 	t.mutex.Lock()
 	defer t.mutex.Unlock()
 	t.mp[contactID] = &exchange
-	//
-	//go func() {
-	//	ticker := time.NewTicker(cacheTime)
-	//	<-ticker.C
-	//	t.mutex.Lock()
-	//	defer t.mutex.Unlock()
-	//	t.mp[contactID] = nil
-	//}()
 }
 
 var tc timerCache
@@ -61,45 +53,74 @@ func init() {
 	}
 }
 
-type dexscreenerPair struct {
-	PriceUsd string `json:"priceUsd"`
-	Volume   struct {
-		H24 float64 `json:"h24"`
-	} `json:"volume"`
+type geckoSimplePriceResp struct {
+	Data struct {
+		Attributes struct {
+			TokenPrices map[string]string `json:"token_prices"`
+		} `json:"attributes"`
+	} `json:"data"`
 }
 
-type dexscreenerResp struct {
-	Pairs []dexscreenerPair `json:"pairs"`
+type geckoPoolAttributes struct {
+	Name              string `json:"name"`
+	BaseTokenPriceUsd string `json:"base_token_price_usd"`
+	VolumeUsd         struct {
+		H24 float64 `json:"h24"`
+	} `json:"volume_usd"`
+}
+
+type geckoTokenPoolsResp struct {
+	Data []struct {
+		Attributes geckoPoolAttributes `json:"attributes"`
+	} `json:"data"`
 }
 
 func fetchTokenPrice(contractID string) (price, vol24 decimal.Decimal) {
 	client := &http.Client{Timeout: 10 * time.Second}
-	url := fmt.Sprintf("https://api.dexscreener.com/latest/dex/token/%s", contractID)
-	req, _ := http.NewRequest("GET", url, nil)
+
+	priceUrl := fmt.Sprintf("https://api.geckoterminal.com/api/v2/simple/networks/filecoin/token_price/%s", contractID)
+	req, _ := http.NewRequest("GET", priceUrl, nil)
+	req.Header.Set("Accept", "application/json")
 	resp, err := client.Do(req)
+	if err == nil {
+		body, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		var r geckoSimplePriceResp
+		if err := json.Unmarshal(body, &r); err == nil {
+			if p, ok := r.Data.Attributes.TokenPrices[contractID]; ok {
+				price, _ = decimal.NewFromString(p)
+			}
+		}
+	}
+
+	poolsUrl := fmt.Sprintf("https://api.geckoterminal.com/api/v2/networks/filecoin/tokens/%s/pools", contractID)
+	req, _ = http.NewRequest("GET", poolsUrl, nil)
+	req.Header.Set("Accept", "application/json")
+	resp, err = client.Do(req)
 	if err != nil {
-		log.Errorf("请求 token %s 价格失败: %s", contractID, err)
+		if price.IsZero() {
+			log.Errorf("请求 token %s 池子失败: %s", contractID, err)
+		}
 		return
 	}
 	defer resp.Body.Close()
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		log.Errorf("读取 token %s 响应失败: %s", contractID, err)
 		return
 	}
-	var r dexscreenerResp
+	var r geckoTokenPoolsResp
 	err = json.Unmarshal(body, &r)
 	if err != nil {
-		log.Errorf("解析 token %s 价格失败: %s, body: %s",
-			contractID, err, string(body[:min(len(body), 200)]))
 		return
 	}
-	for _, pair := range r.Pairs {
-		p, _ := decimal.NewFromString(pair.PriceUsd)
-		v := decimal.NewFromFloat(pair.Volume.H24)
-		if p.GreaterThan(price) {
-			price = p
-			vol24 = v
+	for _, pool := range r.Data {
+		v := decimal.NewFromFloat(pool.Attributes.VolumeUsd.H24)
+		vol24 = vol24.Add(v)
+		if price.IsZero() {
+			p, _ := decimal.NewFromString(pool.Attributes.BaseTokenPriceUsd)
+			if p.GreaterThan(price) {
+				price = p
+			}
 		}
 	}
 	return
