@@ -1,6 +1,8 @@
 package v10
 
 import (
+	"fmt"
+
 	"github.com/filecoin-project/go-address"
 	"github.com/filecoin-project/go-state-types/abi"
 	"github.com/filecoin-project/go-state-types/builtin/v10/datacap"
@@ -94,6 +96,29 @@ func (c ConvertMessageType) ChangeBeneficiaryParams(input *miner.ChangeBeneficia
 		NewBeneficiary: input.NewBeneficiary.String(),
 		NewQuota:       input.NewQuota.Int64(),
 		NewExpiration:  input.NewExpiration.String(),
+	}
+	return
+}
+
+func (c ConvertMessageType) GetBeneficiaryReturn(input *miner.GetBeneficiaryReturn) (result interface{}, err error) {
+	result = &GetBeneficiaryReturn{
+		Active: ActiveBeneficiary{
+			Beneficiary: input.Active.Beneficiary.String(),
+			Term: BeneficiaryTerm{
+				Quota:      input.Active.Term.Quota.String(),
+				UsedQuota:  input.Active.Term.UsedQuota.String(),
+				Expiration: fmt.Sprintf("%d", input.Active.Term.Expiration),
+			},
+		},
+	}
+	if input.Proposed != nil {
+		result.(*GetBeneficiaryReturn).Proposed = &PendingBeneficiaryChange{
+			NewBeneficiary:        input.Proposed.NewBeneficiary.String(),
+			NewQuota:              input.Proposed.NewQuota.String(),
+			NewExpiration:         fmt.Sprintf("%d", input.Proposed.NewExpiration),
+			ApprovedByBeneficiary: input.Proposed.ApprovedByBeneficiary,
+			ApprovedByNominee:     input.Proposed.ApprovedByNominee,
+		}
 	}
 	return
 }

@@ -1,7 +1,7 @@
-package v16
+package v18
 
 import (
-	"github.com/filecoin-project/go-state-types/builtin/v16/market"
+	"github.com/filecoin-project/go-state-types/builtin/v18/market"
 )
 
 // AddVerifiedClientParams

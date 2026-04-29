@@ -1,4 +1,4 @@
-package v13
+package v18
 
 import (
 	"bytes"
@@ -8,14 +8,14 @@ import (
 	"github.com/filecoin-project/go-address"
 	"github.com/filecoin-project/go-bitfield"
 	"github.com/filecoin-project/go-state-types/abi"
-	"github.com/filecoin-project/go-state-types/builtin/v13/datacap"
-	"github.com/filecoin-project/go-state-types/builtin/v13/eam"
-	initial "github.com/filecoin-project/go-state-types/builtin/v13/init"
-	"github.com/filecoin-project/go-state-types/builtin/v13/market"
-	"github.com/filecoin-project/go-state-types/builtin/v13/miner"
-	"github.com/filecoin-project/go-state-types/builtin/v13/multisig"
-	"github.com/filecoin-project/go-state-types/builtin/v13/power"
-	"github.com/filecoin-project/go-state-types/builtin/v13/verifreg"
+	"github.com/filecoin-project/go-state-types/builtin/v18/datacap"
+	"github.com/filecoin-project/go-state-types/builtin/v18/eam"
+	initial "github.com/filecoin-project/go-state-types/builtin/v18/init"
+	"github.com/filecoin-project/go-state-types/builtin/v18/market"
+	"github.com/filecoin-project/go-state-types/builtin/v18/miner"
+	"github.com/filecoin-project/go-state-types/builtin/v18/multisig"
+	"github.com/filecoin-project/go-state-types/builtin/v18/power"
+	"github.com/filecoin-project/go-state-types/builtin/v18/verifreg"
 	"gitlab.forceup.in/fil-data-factory/filscan-backend/modules/filscan/domain/message"
 )
 
@@ -29,6 +29,7 @@ var newReturns = map[string]interface{}{
 	"ChangeBeneficiary":          abi.EmptyValue{},
 	"GetBeneficiary":             miner.GetBeneficiaryReturn{},
 	"GetBeneficiaryExported":     miner.GetBeneficiaryReturn{},
+	"InitialPledgeExported":      abi.TokenAmount{},
 	"ChangeMultiaddrs":           abi.EmptyValue{},
 	"ChangeOwnerAddress":         abi.EmptyValue{},
 	"ChangePeerID":               abi.EmptyValue{},

@@ -24,6 +24,9 @@ var newParams = map[string]interface{}{
 	"Approve":                    multisig.TxnIDParams{},
 	"Cancel":                     multisig.TxnIDParams{},
 	"CancelExported":             multisig.TxnIDParams{},
+	"GetBeneficiary":             abi.EmptyValue{},
+	"GetBeneficiaryExported":     abi.EmptyValue{},
+	"MaxTerminationFee":          miner.MaxTerminationFeeParams{},
 	"ChangeBeneficiary":          miner.ChangeBeneficiaryParams{},
 	"ChangeMultiaddrs":           miner.ChangeMultiaddrsParams{},
 	"ChangeOwnerAddress":         address.Address{},
@@ -127,6 +130,17 @@ func DecodeMessageParams(input interface{}, methodName string) (result interface
 		}
 		if v != nil {
 			result, err = ConvertMessageType{}.TxnIDParams(v)
+			if err != nil {
+				return
+			}
+		}
+	case *miner.MaxTerminationFeeParams:
+		err = v.UnmarshalCBOR(bytes.NewReader(paramsByte))
+		if err != nil {
+			return
+		}
+		if v != nil {
+			result, err = ConvertMessageType{}.MaxTerminationFeeParams(v)
 			if err != nil {
 				return
 			}

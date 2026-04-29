@@ -1,18 +1,18 @@
-package v13
+package v18
 
 import (
 	"fmt"
 
 	"github.com/filecoin-project/go-address"
 	"github.com/filecoin-project/go-state-types/abi"
-	"github.com/filecoin-project/go-state-types/builtin/v13/datacap"
-	"github.com/filecoin-project/go-state-types/builtin/v13/eam"
-	initial "github.com/filecoin-project/go-state-types/builtin/v13/init"
-	"github.com/filecoin-project/go-state-types/builtin/v13/market"
-	"github.com/filecoin-project/go-state-types/builtin/v13/miner"
-	"github.com/filecoin-project/go-state-types/builtin/v13/multisig"
-	"github.com/filecoin-project/go-state-types/builtin/v13/power"
-	"github.com/filecoin-project/go-state-types/builtin/v13/verifreg"
+	"github.com/filecoin-project/go-state-types/builtin/v18/datacap"
+	"github.com/filecoin-project/go-state-types/builtin/v18/eam"
+	initial "github.com/filecoin-project/go-state-types/builtin/v18/init"
+	"github.com/filecoin-project/go-state-types/builtin/v18/market"
+	"github.com/filecoin-project/go-state-types/builtin/v18/miner"
+	"github.com/filecoin-project/go-state-types/builtin/v18/multisig"
+	"github.com/filecoin-project/go-state-types/builtin/v18/power"
+	"github.com/filecoin-project/go-state-types/builtin/v18/verifreg"
 	"github.com/libp2p/go-libp2p/core/peer"
 	"github.com/multiformats/go-multiaddr"
 	"gitlab.forceup.in/fil-data-factory/filscan-backend/modules/filscan/domain/message"
@@ -119,6 +119,14 @@ func (c ConvertMessageType) GetBeneficiaryReturn(input *miner.GetBeneficiaryRetu
 			ApprovedByBeneficiary: input.Proposed.ApprovedByBeneficiary,
 			ApprovedByNominee:     input.Proposed.ApprovedByNominee,
 		}
+	}
+	return
+}
+
+func (c ConvertMessageType) MaxTerminationFeeParams(input *miner.MaxTerminationFeeParams) (result interface{}, err error) {
+	result = &MaxTerminationFeeParams{
+		Power:         input.Power.String(),
+		InitialPledge: input.InitialPledge.String(),
 	}
 	return
 }
