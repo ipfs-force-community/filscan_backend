@@ -17,7 +17,7 @@ require (
 	github.com/filecoin-project/go-bitfield v0.2.4
 	github.com/filecoin-project/go-jsonrpc v0.10.1
 	github.com/filecoin-project/go-state-types v0.18.0
-	github.com/filecoin-project/lotus v1.28.2-0.20260429015201-f444b7b3edfa
+	github.com/filecoin-project/lotus v1.36.0-rc1
 	github.com/gin-gonic/gin v1.8.2
 	github.com/go-redsync/redsync/v4 v4.11.0
 	github.com/go-resty/resty/v2 v2.7.0
@@ -112,7 +112,7 @@ require (
 	github.com/filecoin-project/go-amt-ipld/v4 v4.4.0 // indirect
 	github.com/filecoin-project/go-clock v0.1.0 // indirect
 	github.com/filecoin-project/go-crypto v0.1.0 // indirect
-	github.com/filecoin-project/go-f3 v0.8.12 // indirect
+	github.com/filecoin-project/go-f3 v0.8.13 // indirect
 	github.com/filecoin-project/go-hamt-ipld v0.1.5 // indirect
 	github.com/filecoin-project/go-hamt-ipld/v2 v2.0.0 // indirect
 	github.com/filecoin-project/go-hamt-ipld/v3 v3.4.1 // indirect
