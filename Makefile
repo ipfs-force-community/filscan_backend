@@ -1,6 +1,11 @@
 GOHOSTOS:=$(shell go env GOHOSTOS)
 GOPATH:=$(shell go env GOPATH)
-VERSION:=commit_$(shell git log -1 --pretty=format:%h)_time_$(shell date +"%Y-%m-%d_%H:%M:%S")
+GIT_TAG:=$(shell git describe --tags --exact-match 2>/dev/null || echo "")
+GIT_COMMIT:=$(shell git log -1 --pretty=format:%h)
+DIRTY:=$(shell git status --porcelain 2>/dev/null | head -1 | xargs -I{} echo "-dirty")
+BUILD_TIME:=$(shell date +"%Y-%m-%d_%H:%M:%S")
+VERSION:=mainnet_$(or $(GIT_TAG),$(GIT_COMMIT))$(DIRTY)_commit_$(GIT_COMMIT)_time_$(BUILD_TIME)
+VERSION_CALIB:=calibnet_$(or $(GIT_TAG),$(GIT_COMMIT))$(DIRTY)_commit_$(GIT_COMMIT)_time_$(BUILD_TIME)
 
 ifeq ($(GOHOSTOS), windows)
 	#the `find.exe` is different from `find` in bash/shell.
@@ -54,20 +59,20 @@ build-calib: build-calib-syncer build-calib-api build-calib-abi-decoder build-ca
 
 build-calib-api:
 	make generate
-	mkdir -p bin/ && go build --tags=bundle,calibnet -ldflags "-X main.Version=$(VERSION) -X main.Name=filscan-api" -o ./bin/api ./cmd/filscan
+	mkdir -p bin/ && go build --tags=bundle,calibnet -ldflags "-X main.Version=$(VERSION_CALIB) -X main.Name=filscan-api" -o ./bin/api ./cmd/filscan
 
 build-calib-syncer:
 	make generate
 	make bundle
 	make build-abi-decoder
-	mkdir -p bin/ && go build --tags=bundle,calibnet -ldflags "-X main.Version=$(VERSION) -X main.Name=filscan-syncer" -o ./bin/syncer ./cmd/syncer
+	mkdir -p bin/ && go build --tags=bundle,calibnet -ldflags "-X main.Version=$(VERSION_CALIB) -X main.Name=filscan-syncer" -o ./bin/syncer ./cmd/syncer
 
 build-calib-abi-decoder:
-	mkdir -p bin/ && go build --tags=bundle,calibnet -ldflags "-X main.Version=$(VERSION) -X main.Name=abi-decoder" -o ./bin/abi-decoder ./cmd/abi-decoder
+	mkdir -p bin/ && go build --tags=bundle,calibnet -ldflags "-X main.Version=$(VERSION_CALIB) -X main.Name=abi-decoder" -o ./bin/abi-decoder ./cmd/abi-decoder
 
 build-calib-monitor:
 	make generate
-	mkdir -p bin/ && go build --tags=bundle,calibnet -ldflags "-X main.Version=$(VERSION) -X main.Name=filscan-monitor" -o ./bin/monitor ./cmd/monitor
+	mkdir -p bin/ && go build --tags=bundle,calibnet -ldflags "-X main.Version=$(VERSION_CALIB) -X main.Name=filscan-monitor" -o ./bin/monitor ./cmd/monitor
 
 run-api:
 	go run cmd/filscan/filscan.go cmd/filscan/wire_gen.go -c configs/local.toml
