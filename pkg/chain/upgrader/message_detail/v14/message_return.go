@@ -27,6 +27,8 @@ var newReturns = map[string]interface{}{
 	"Cancel":                     abi.EmptyValue{},
 	"CancelExported":             abi.EmptyValue{},
 	"ChangeBeneficiary":          abi.EmptyValue{},
+	"GetBeneficiary":            miner.GetBeneficiaryReturn{},
+	"GetBeneficiaryExported":   miner.GetBeneficiaryReturn{},
 	"ChangeMultiaddrs":           abi.EmptyValue{},
 	"ChangeOwnerAddress":         abi.EmptyValue{},
 	"ChangePeerID":               abi.EmptyValue{},
@@ -230,6 +232,17 @@ func DecodeMessageReturns(input interface{}, methodName string) (result interfac
 		}
 		if v != nil {
 			result, err = ConvertMessageType{}.TransferFromReturn(v)
+			if err != nil {
+				return
+			}
+		}
+	case *miner.GetBeneficiaryReturn:
+		err = v.UnmarshalCBOR(bytes.NewReader(paramsByte))
+		if err != nil {
+			return
+		}
+		if v != nil {
+			result, err = ConvertMessageType{}.GetBeneficiaryReturn(v)
 			if err != nil {
 				return
 			}

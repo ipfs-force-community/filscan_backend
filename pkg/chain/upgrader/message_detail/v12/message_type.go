@@ -56,6 +56,32 @@ type ChangeBeneficiaryParams struct {
 	NewExpiration  string
 }
 
+// GetBeneficiaryReturn
+
+type BeneficiaryTerm struct {
+	Quota      string
+	UsedQuota  string
+	Expiration string
+}
+
+type PendingBeneficiaryChange struct {
+	NewBeneficiary        string
+	NewQuota              string
+	NewExpiration         string
+	ApprovedByBeneficiary bool
+	ApprovedByNominee     bool
+}
+
+type ActiveBeneficiary struct {
+	Beneficiary string
+	Term        BeneficiaryTerm
+}
+
+type GetBeneficiaryReturn struct {
+	Active   ActiveBeneficiary
+	Proposed *PendingBeneficiaryChange
+}
+
 // ChangeMultiaddrsParams
 
 type ChangeMultiaddrsParams struct {
