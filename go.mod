@@ -17,7 +17,7 @@ require (
 	github.com/filecoin-project/go-bitfield v0.2.4
 	github.com/filecoin-project/go-jsonrpc v0.10.1
 	github.com/filecoin-project/go-state-types v0.18.0
-	github.com/filecoin-project/lotus v1.36.0-rc1
+	github.com/filecoin-project/lotus v1.36.0
 	github.com/gin-gonic/gin v1.8.2
 	github.com/go-redsync/redsync/v4 v4.11.0
 	github.com/go-resty/resty/v2 v2.7.0
@@ -150,7 +150,6 @@ require (
 	github.com/goccy/go-json v0.10.3 // indirect
 	github.com/golang/groupcache v0.0.0-20241129210726-2c02b8208cf8 // indirect
 	github.com/golang/mock v1.6.0 // indirect
-	github.com/google/subcommands v1.2.0 // indirect
 	github.com/gorilla/websocket v1.5.3 // indirect
 	github.com/gozelle/color v1.14.1 // indirect
 	github.com/gozelle/go-difflib v1.0.0 // indirect
