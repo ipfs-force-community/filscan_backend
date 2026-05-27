@@ -67,13 +67,13 @@ func newApp(conf *config.Config, adapter londobell.Adapter, fullApi filscan.Brow
 	chain.RegisterBaseTime(r.Epoch, r.BlockTime)
 
 	server := mix.NewServer()
-	server.RegisterAPI(server.Group("/api", func(c *gin.Context) {
+	server.RegisterAPI(server.Group("/api", _app.Cors(), func(c *gin.Context) {
 		ctx := c.Request.Context()
 		ctx = context.WithValue(ctx, "url", c.Request.URL.String()) //nolint
 		c.Request = c.Request.WithContext(ctx)
 	}), "v1", fullApi)
 
-	server.RegisterAPI(server.Group("/pro", bearer.Authentication(), wrapCustomError(), vip.AuthenticationWithVIP(db, redis)), "v1", proApi)
+	server.RegisterAPI(server.Group("/pro", _app.Cors(), bearer.Authentication(), wrapCustomError(), vip.AuthenticationWithVIP(db, redis)), "v1", proApi)
 
 	//server.RegisterAPI(server.Group("/api/cron"), "v1", cronApi)
 	return server.Engine
