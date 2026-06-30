@@ -237,7 +237,9 @@ func (r ResourceBiz) TopActiveAddress(ctx context.Context, _ struct{}) (*[]filsc
 		return nil, err
 	}
 
-	resps.Data.Flows = resps.Data.Flows[:10]
+	if len(resps.Data.Flows) > 10 {
+		resps.Data.Flows = resps.Data.Flows[:10]
+	}
 	return &resps.Data.Flows, nil
 }
 
