@@ -4,8 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"math"
-	"math/rand"
 	"regexp"
 	"strconv"
 	"sync"
@@ -80,9 +78,9 @@ type BlockChainBiz struct {
 
 func (b BlockChainBiz) GasSummary(ctx context.Context, req struct{}) (resp *filscan.GasSummaryResponse, err error) {
 	return &filscan.GasSummaryResponse{
-		Sum:         decimal.NewFromInt(rand.Int63n(math.MaxInt64)),
-		ContractGas: decimal.NewFromInt(rand.Int63n(math.MaxInt64)),
-		Others:      decimal.NewFromInt(rand.Int63n(math.MaxInt64)),
+		Sum:         decimal.NewFromInt(0),
+		ContractGas: decimal.NewFromInt(0),
+		Others:      decimal.NewFromInt(0),
 	}, nil
 }
 
