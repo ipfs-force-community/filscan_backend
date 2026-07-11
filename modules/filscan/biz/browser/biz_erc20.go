@@ -93,7 +93,7 @@ func (e ERC20Biz) ERC20RecentTransfer(ctx context.Context, request *filscan.ERC2
 }
 
 func (e ERC20Biz) ERC20AddrTransfers(ctx context.Context, request *filscan.ERC20AddrTransfersReq) (*filscan.ERC20AddrTransfersReply, error) {
-	if len(request.Address) == 0 {
+	if len(request.Address) < 2 {
 		return nil, nil
 	}
 	var err error
@@ -162,7 +162,7 @@ func (e ERC20Biz) ERC20AddrTransfers(ctx context.Context, request *filscan.ERC20
 }
 
 func (e ERC20Biz) ERC20AddrTransfersTokenTypes(ctx context.Context, request *filscan.ERC20AddrTransfersTokenTypesReq) (*filscan.ERC20AddrTransfersTokenTypesReply, error) {
-	if len(request.Address) == 0 {
+	if len(request.Address) < 2 {
 		return nil, nil
 	}
 	var err error
@@ -217,7 +217,7 @@ func ToEthAddr(addr string) (string, error) {
 }
 
 func (e ERC20Biz) ERC20OwnerTokenList(ctx context.Context, request *filscan.ERC20HolderRequest) (*filscan.ERC20HolderReply, error) {
-	if len(request.Address) == 0 {
+	if len(request.Address) < 2 {
 		return nil, nil
 	}
 	var err error
