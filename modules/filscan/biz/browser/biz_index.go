@@ -64,10 +64,10 @@ func (i *IndexBiz) cacheTotalIndicators() {
 				log.Errorf("call Get Latest Tipset error: %s", err)
 				return
 			}
-			if epoch != nil ||
-				i.totalIndicators == nil ||
+			if len(epoch) > 0 &&
+				(i.totalIndicators == nil ||
 				epoch[0].ID > i.totalIndicators.TotalIndicators.LatestHeight ||
-				time.Since(i.lastCacheTime) > 5*time.Second {
+				time.Since(i.lastCacheTime) > 5*time.Second) {
 				var resp *filscan.TotalIndicatorsResponse
 				resp, err = i.getTotalIndicators(context.Background(), filscan.TotalIndicatorsRequest{})
 				if err != nil {
