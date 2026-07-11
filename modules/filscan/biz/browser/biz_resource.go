@@ -60,6 +60,7 @@ func (r ResourceBiz) FilecoinBaseData(ctx context.Context, _ struct{}) (*filscan
 		log.Errorf("get info from dncapi failed: %w", err)
 		return nil, err
 	}
+	defer resp.Body.Close()
 	bs, err := io.ReadAll(resp.Body)
 	if err != nil {
 		log.Errorf("io read all: %w", err)
@@ -99,6 +100,7 @@ func (r ResourceBiz) FilecoinBaseData(ctx context.Context, _ struct{}) (*filscan
 		log.Errorf("get info from dncapi failed: %w", err)
 		return nil, err
 	}
+	defer resp.Body.Close()
 	bs, err = io.ReadAll(resp.Body)
 	if err != nil {
 		log.Errorf("io read all: %w", err)
@@ -115,6 +117,7 @@ func (r ResourceBiz) FilecoinBaseData(ctx context.Context, _ struct{}) (*filscan
 		log.Errorf("get info from dncapi failed: %w", err)
 		return nil, err
 	}
+	defer resp.Body.Close()
 	bs, err = io.ReadAll(resp.Body)
 	if err != nil {
 		log.Errorf("io read all: %w", err)
