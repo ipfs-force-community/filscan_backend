@@ -68,7 +68,7 @@ func (a AccountBiz) TransferMethodByAccountID(ctx context.Context, req filscan.A
 		return
 	}
 	resp.MethodNameList = append(resp.MethodNameList, "Send", "Receive", "Transfer", "Burn")
-	if req.AccountID[0] == '0' && req.AccountID[1] == 'x' {
+	if strings.HasPrefix(req.AccountID, "0x") {
 		return resp, nil
 	}
 	actorInfo, err := a.MinerInfoBiz.adapter.Actor(ctx, chain.SmartAddress(req.AccountID), nil)
