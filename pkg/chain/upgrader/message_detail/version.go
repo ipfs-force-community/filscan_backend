@@ -42,7 +42,9 @@ var (
 	UpgradeTockHeight       = chain.Epoch(buildconstants.UpgradeTockHeight)
 	UpgradeGoldenWeekHeight = chain.Epoch(buildconstants.UpgradeGoldenWeekHeight)
 	UpgradeFireHorseHeight  = chain.Epoch(buildconstants.UpgradeFireHorseHeight)
-	VersionMap              = map[int64]network.Version{
+	// NV29 Solstice (FIP-0118). 主网为 UpgradeHeightUnscheduled，calibnet 为 4109133。
+	UpgradeSolsticeHeight = chain.Epoch(buildconstants.UpgradeSolsticeHeight)
+	VersionMap            = map[int64]network.Version{
 		GENESIS:                         network.Version0,
 		BREEZE:                          network.Version1,
 		SMOKE:                           network.Version2,
@@ -72,6 +74,7 @@ var (
 		UpgradeTockHeight.Int64():       network.Version26,
 		UpgradeGoldenWeekHeight.Int64(): network.Version27,
 		UpgradeFireHorseHeight.Int64():  network.Version28,
+		UpgradeSolsticeHeight.Int64():   network.Version29,
 	}
 )
 
@@ -81,15 +84,18 @@ func NetworkVersionFromEpoch(epoch chain.Epoch) (targetVersion network.Version) 
 		HYPERDRIVE, CHOCOLATE, OHSNAP, SKYR, SHARK, HYGGE, LIGHTNING.Int64(), THUNDER.Int64(),
 		UpgradeWatermelonHeight.Int64(), UpgradeDragonHeight.Int64(), UpgradeWaffleHeight.Int64(),
 		UpgradeTuktukHeight.Int64(), UpgradeTeepHeight.Int64(), UpgradeTockHeight.Int64(),
-		UpgradeGoldenWeekHeight.Int64(), UpgradeFireHorseHeight.Int64(),
+		UpgradeGoldenWeekHeight.Int64(), UpgradeFireHorseHeight.Int64(), UpgradeSolsticeHeight.Int64(),
 	}
 
 	index := sort.Search(len(VersionList), func(i int) bool { return VersionList[i] > epoch.Int64() }) - 1 // 使用二分查找算法查找区间索引
 	if index < 0 {
 		index = 0
-	} else if index >= len(VersionList)-1 {
-		index = len(VersionList) - 2
 	}
+	// 注意：sort.Search 的返回值已保证 index <= len(VersionList)-1，无需再做上界收敛。
+	// 历史上这里写的是 `else if index >= len(VersionList)-1 { index = len(VersionList) - 2 }`，
+	// 会把「已到达最后一个升级高度」的 epoch 强行回退到倒数第二个版本，导致最新 NV 永远选不中
+	// （NV28 起就已经踩到，只因 v17/v18 解码内容恰好一致而没有暴露）。NV29 在 calibnet 已排期，
+	// 若保留该分支，Solstice 高度之后的 epoch 仍会解析成 v18。此处删除该分支。
 	targetVersion = VersionMap[VersionList[index]]
 	return
 }
