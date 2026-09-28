@@ -149,6 +149,9 @@ type FakeAgg struct {
 	HeadID int64
 	// TracesFn 按高度造 traces；nil 表示该高度没有 traces
 	TracesFn func(epoch chain.Epoch) []*londobell.TraceMessage
+	// CreateTimeFn 造 CreateTime 的返回；nil = 返回基时(0)且无错误。
+	// actor 链路要用：CalcChangeActorTask.PrepareActor 只在「该 actor 不是新来者」时才问创建时间。
+	CreateTimeFn func(addr chain.SmartAddress) (chain.Epoch, error)
 
 	mu     sync.Mutex
 	epochs []int64 // Traces 被请求过的高度（用于断言区间边界）
@@ -189,6 +192,14 @@ func (f *FakeAgg) ParentTipset(_ context.Context, start chain.Epoch) ([]*londobe
 	return []*londobell.ParentTipset{{ID: start.Int64(), Cids: []string{fmt.Sprintf("parent-of-%d", start.Int64())}}}, nil
 }
 
+// CreateTime 造 actor 创建时间（FakeAgg 对 actor 链路的最小支持）
+func (f *FakeAgg) CreateTime(_ context.Context, addr chain.SmartAddress) (chain.Epoch, error) {
+	if f.CreateTimeFn != nil {
+		return f.CreateTimeFn(addr)
+	}
+	return 0, nil
+}
+
 func (f *FakeAgg) Traces(_ context.Context, start, _ chain.Epoch) ([]*londobell.TraceMessage, error) {
 	f.mu.Lock()
 	f.epochs = append(f.epochs, start.Int64())
@@ -211,6 +222,9 @@ type FakeAdapter struct {
 	State   *londobell.ActorState
 	ErrOnce error
 	OnError func()
+	// StateByActor 按 actor 地址返回不同状态（键命中时优先于 State）。
+	// 需要「同一高度多个不同 actor」的链路用它 —— 如 chain.actor_actions 的 (epoch, actor_id) 主键。
+	StateByActor map[chain.SmartAddress]*londobell.ActorState
 
 	mu    sync.Mutex
 	calls int
@@ -224,7 +238,7 @@ func (a *FakeAdapter) Calls() (calls, errs int) {
 	return a.calls, a.errs
 }
 
-func (a *FakeAdapter) Actor(_ context.Context, _ chain.SmartAddress, _ *chain.Epoch) (*londobell.ActorState, error) {
+func (a *FakeAdapter) Actor(_ context.Context, actorId chain.SmartAddress, _ *chain.Epoch) (*londobell.ActorState, error) {
 	a.mu.Lock()
 	a.calls++
 	var err error
@@ -234,6 +248,9 @@ func (a *FakeAdapter) Actor(_ context.Context, _ chain.SmartAddress, _ *chain.Ep
 		a.errs++
 	}
 	state, hook := a.State, a.OnError
+	if s, ok := a.StateByActor[actorId]; ok {
+		state = s
+	}
 	a.mu.Unlock()
 
 	if err != nil {

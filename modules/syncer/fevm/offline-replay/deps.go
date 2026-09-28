@@ -16,8 +16,9 @@ import (
 	"gorm.io/gorm"
 )
 
-// 本文件是「离线回放」工具链的公共装配与执行骨架：三个子命令只声明自己的 Target
-// （同步器名 + 任务/计算器 + 「只统计不落库」包装），依赖与运行流程完全一致。
+// 本文件是「离线回放」工具链的公共装配与执行骨架：四个子命令（evm-transfer / erc20 / fns /
+// actor-actions）只声明自己的 Target（同步器名 + 任务/计算器 + 「只统计不落库」包装），
+// 依赖与运行流程完全一致。
 
 // Deps 离线回放需要的外部依赖（与生产同步器同一套构造器，指向同一份配置）
 type Deps struct {
@@ -93,12 +94,29 @@ func (d *Deps) AbiNode() (*lotus_api.Node, error) {
 	return lotus_api.NewBasicAuthLotusApi("offline-replay", *d.Conf.ABINode, lotus_api.WithAuth("", token))
 }
 
-// Execute 跑完整个高度区间并打印统计报告（阻塞直到区间跑完或收到退出信号）。
-func Execute(s *syncer.Syncer, tel *Telemetry, opt RunOptions) error {
-	rng, err := ResolveRange(opt.From, opt.To)
+// Execute 跑完整个回放计划并打印统计报告（阻塞直到跑完或收到退出信号）。
+//
+//   - 区间模式（--start/--end）：一个 Dry 同步器跑完 [From, To]（失败即整批重试，原语义）；
+//   - 清单模式（--epochs-file）：升序逐个高度各跑一个 Dry 同步器，单个高度失败不阻断整批
+//     （见 list.go）。两种模式的共同点：只写派生表，不写同步指针/台账/任务高度。
+func Execute(plan Plan, opt RunOptions, target Target, db *gorm.DB, agg londobell.Agg,
+	adapter londobell.Adapter, writes func() []WriteStat) error {
+
+	if plan.IsList() {
+		return executeList(plan, opt, target, db, agg, adapter, writes)
+	}
+
+	opt.From, opt.To = plan.Range.From.Int64(), plan.Range.To.Int64()
+	s, tel, err := Assemble(opt, target, db, agg, adapter)
 	if err != nil {
 		return err
 	}
+	tel.Writes = writes
+	return runRange(s, tel, plan.Range, opt)
+}
+
+// runRange 区间模式的执行：一个同步器跑完整段，跑完打印报告
+func runRange(s *syncer.Syncer, tel *Telemetry, rng Range, opt RunOptions) error {
 	if err := s.Init(); err != nil {
 		return err
 	}
