@@ -17,6 +17,7 @@ import (
 	procmd "gitlab.forceup.in/fil-data-factory/filscan-backend/modules/pro/cmd"
 	"gitlab.forceup.in/fil-data-factory/filscan-backend/modules/syncer"
 	syncer_api "gitlab.forceup.in/fil-data-factory/filscan-backend/modules/syncer/api"
+	actoractionscmd "gitlab.forceup.in/fil-data-factory/filscan-backend/modules/syncer/calculator/calc-change-actor-task/cmd"
 	erc20cmd "gitlab.forceup.in/fil-data-factory/filscan-backend/modules/syncer/fevm/erc20/cmd"
 	evmtransfercmd "gitlab.forceup.in/fil-data-factory/filscan-backend/modules/syncer/fevm/evm-transfer-task/cmd"
 	fnscmd "gitlab.forceup.in/fil-data-factory/filscan-backend/modules/syncer/fevm/fns-task/cmd"
@@ -66,8 +67,10 @@ func init() {
 	rootCmd.AddCommand(evmtransfercmd.Command())
 	// 离线回放指定高度区间的 ERC20 派生数据（同上，另需 ABI 解码器与 lotus 节点）
 	rootCmd.AddCommand(erc20cmd.Command())
-	// 离线回放指定高度区间的 FNS 派生数据（task + calculator，可 --skip-calculator）
+	// 离线回放指定高度区间/高度清单的 FNS 派生数据（task + calculator，可 --skip-calculator）
 	rootCmd.AddCommand(fnscmd.Command())
+	// 离线回放指定高度区间/高度清单的变动 Actor 派生数据（只跑计算器，补 chain.actor_actions）
+	rootCmd.AddCommand(actoractionscmd.Command())
 	rootCmd.AddCommand(procmd.ProInfoCommand())
 	rootCmd.AddCommand(procmd.ProRewardCommand())
 	rootCmd.AddCommand(procmd.ProSectorCommand())
