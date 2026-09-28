@@ -129,6 +129,22 @@ func WithEpochsThreshold(v int64) Option {
 	}
 }
 
+// WithDataErrorThreshold 设置「数据级错误连续失败多少次即跳过该高度」的阈值。
+// 取值 <= 0 时使用默认值 defaultDataErrorThreshold（5）。
+// 配置项：syncer.data_error_threshold。
+func WithDataErrorThreshold(v int64) Option {
+	return func(conf *config) {
+		conf.dataErrorThreshold = v
+	}
+}
+
+// WithSkipLedger 注入「数据级错误跳过台账」读写实现（不注入时默认使用 dal.SyncerDal）
+func WithSkipLedger(ledger repository.SyncerSkipLedger) Option {
+	return func(conf *config) {
+		conf.skipLedger = ledger
+	}
+}
+
 // WithGlobalRollback 全局回滚函数
 func WithGlobalRollback(h ...func(ctx context.Context, gteEpoch chain.Epoch) error) Option {
 	return func(conf *config) {
@@ -139,23 +155,25 @@ func WithGlobalRollback(h ...func(ctx context.Context, gteEpoch chain.Epoch) err
 type Option func(conf *config)
 
 type config struct {
-	name              string
-	db                *gorm.DB
-	agg               londobell.Agg
-	minerAgg          londobell.MinerAgg
-	adapter           londobell.Adapter
-	redis             *redis.Redis
-	initEpoch         *int64
-	stopEpoch         *int64
-	repo              repository.SyncerRepo
-	errorWaitDuration time.Duration                    // 同步错误等待时间
-	epochsThreshold   int64                            // 并发同步段阈值
-	epochsChunk       int64                            // 并发同步的并发数
-	taskGroups        []TaskGroup                      // 同步任务分组，Runner 之间并发执行，任务之间同步执行
-	calculators       []Calculator                     // 与同步器相关联的计算器
-	contextBuilders   []func(ctx *Context) (err error) // 准备前置 Context
-	dry               bool                             // Dry 模式，只正常执行同步任务和计算任务，不做 Tipset 检查及回滚检查等
-	globalRollback    []func(ctx context.Context, gteEpoch chain.Epoch) error
+	name               string
+	db                 *gorm.DB
+	agg                londobell.Agg
+	minerAgg           londobell.MinerAgg
+	adapter            londobell.Adapter
+	redis              *redis.Redis
+	initEpoch          *int64
+	stopEpoch          *int64
+	repo               repository.SyncerRepo
+	errorWaitDuration  time.Duration                    // 同步错误等待时间
+	epochsThreshold    int64                            // 并发同步段阈值
+	epochsChunk        int64                            // 并发同步的并发数
+	taskGroups         []TaskGroup                      // 同步任务分组，Runner 之间并发执行，任务之间同步执行
+	calculators        []Calculator                     // 与同步器相关联的计算器
+	contextBuilders    []func(ctx *Context) (err error) // 准备前置 Context
+	dry                bool                             // Dry 模式，只正常执行同步任务和计算任务，不做 Tipset 检查及回滚检查等
+	globalRollback     []func(ctx context.Context, gteEpoch chain.Epoch) error
+	dataErrorThreshold int64                       // 数据级错误连续失败多少次即跳过该高度
+	skipLedger         repository.SyncerSkipLedger // 数据级错误跳过台账（默认 dal.SyncerDal）
 }
 
 func isValidSyncerName(name string) bool {
@@ -226,6 +244,8 @@ type Syncer struct {
 	repo  repository.SyncerRepo
 	log   *logging.Logger
 	quit  chan struct{}
+	// failures 数据级错误「连续失败次数」计数器，达阈值后登记并跳过该高度（见 data_error.go）
+	failures *dataErrorTracker
 	*config
 }
 
@@ -252,7 +272,18 @@ func (s *Syncer) Init() (err error) {
 		s.epochsThreshold = 20
 	}
 
+	if s.dataErrorThreshold <= 0 {
+		// 默认 5：同一高度连续 5 轮都是数据级失败（重试间隔 errorWaitDuration，默认 15s）
+		// 才登记并跳过该高度
+		s.dataErrorThreshold = defaultDataErrorThreshold
+	}
+	s.failures = newDataErrorTracker(s.dataErrorThreshold)
+
 	s.repo = dal.NewSyncerDal(s.db)
+	if s.skipLedger == nil {
+		// 未显式注入时使用默认实现（单测通过 WithSkipLedger 注入假实现）
+		s.skipLedger = dal.NewSyncerDal(s.db)
+	}
 
 	// 初始化 syncer 高度
 	if !s.dry {
@@ -468,8 +499,20 @@ func (s *Syncer) sync(end chain.Epoch) (err error) {
 
 	generate := func(epoch chain.Epoch) parallel.Runner[*po.SyncSyncerEpoch] {
 		return func(_ context.Context) (*po.SyncSyncerEpoch, error) {
+			// 已登记为「数据级坏点」的高度（见 data_error.go）：不再执行任务与上下文构建，
+			// 只回填 tipset 身份行，让链条保持连续、后续高度继续同步
+			if rec, ok := s.skippedEpochFailure(epoch); ok {
+				s.logSkippedEpochOnce(epoch)
+				if rec.identity == nil {
+					return nil, fmt.Errorf("高度 %s 已登记跳过但缺少 tipset 身份行", epoch)
+				}
+				return rec.identity, nil
+			}
 			r, e := s.execGroups(epoch, total, left, start, chain.NewLCRCRange(s.epoch, end))
 			if e != nil {
+				// 按高度精确归属失败：数据级错误累计到阈值即登记并跳过该高度，
+				// 传输级错误只记录分类结果（不计入），保持原有重试语义
+				s.recordEpochFailure(epoch, e)
 				return nil, e
 			}
 			return r, nil
@@ -493,8 +536,26 @@ func (s *Syncer) sync(end chain.Epoch) (err error) {
 	// 一段高度追完后，则开始按高度顺序逐步执行计算任务
 	for i := s.epoch; i <= end; i++ {
 		now := time.Now()
+		// 数据级坏点：不执行计算器（其数据本就不可解析），只写身份行保持链条连续
+		if _, ok := s.skippedEpochFailure(i); ok {
+			s.logSkippedEpochOnce(i)
+			if err = s.saveSkippedEpochIdentity(i, syncerEpochs[i.Int64()]); err != nil {
+				return
+			}
+			continue
+		}
 		err = s.execCalculators(i, syncerEpochs[i.Int64()], chain.NewLCRCRange(s.epoch, end)) // 这里要执行计算，并把同步来，从agg prepare的数据存进去。才能判断是否分叉
 		if err != nil {
+			// 计算器失败同样按高度归属：若该高度刚被判定为数据级坏点（已登记台账），
+			// 则跳过该高度继续后续高度；否则保持「失败即重试」的原有语义
+			if s.recordEpochFailure(i, err) {
+				if e := s.saveSkippedEpochIdentity(i, syncerEpochs[i.Int64()]); e != nil {
+					err = e
+					return
+				}
+				s.log.Warnf("高度 %s 已登记为数据级坏点并跳过，继续后续高度", i)
+				continue
+			}
 			return
 		}
 		current := chain.CurrentEpoch()
@@ -529,6 +590,10 @@ func (s *Syncer) sync(end chain.Epoch) (err error) {
 	}
 
 	s.epoch = end + 1
+	// 本批高度（含被跳过的）已经推进过去：清理失败计数与跳过状态，避免长跑时无限累积
+	if s.failures != nil {
+		s.failures.resetBelow(s.epoch)
+	}
 
 	return
 }
@@ -638,6 +703,21 @@ func (s *Syncer) CheckConsistency(start, end chain.Epoch) (epoch chain.Epoch, er
 		}
 	}
 
+	// 因数据级错误被跳过的高度不会执行任务/计算器，因此没有任务记录：
+	// 它们已登记在跳过台账（chain.sync_skipped_epochs）中，属于「已知的数据坏点」而非遗漏，
+	// 不参与任务覆盖度检查，否则一致性检查会误判为任务缺失并触发回滚。
+	skips := map[int64]struct{}{}
+	if s.skipLedger != nil {
+		var skipped []*po.SyncSkippedEpoch
+		skipped, err = s.skipLedger.GetSkippedEpochs(context.Background(), s.name, chain.NewLCRCRange(s.epoch, end))
+		if err != nil {
+			return epoch, err
+		}
+		for _, v := range skipped {
+			skips[v.Epoch] = struct{}{}
+		}
+	}
+
 	tasksMap := map[string]map[int64]struct{}{}
 	for _, v := range tasksEpochs {
 		if _, ok := tasksMap[v.Task]; !ok {
@@ -652,6 +732,9 @@ func (s *Syncer) CheckConsistency(start, end chain.Epoch) (epoch chain.Epoch, er
 		}
 		for i := s.epoch.Int64(); i <= end.Int64(); i++ {
 			if _, ok := empties[i]; ok {
+				continue
+			}
+			if _, ok := skips[i]; ok {
 				continue
 			}
 			if _, ok := tasksMap[name][i]; !ok {
@@ -735,6 +818,11 @@ func (s *Syncer) Rollback(from, to chain.Epoch) (err error) {
 
 	// 重置回滚高度
 	s.epoch = to
+	// 链回滚后，被回滚高度的「数据级坏点」判定不再成立（区块数据可能已被重组替换），
+	// 清空跳过计数与已跳过集合，让这些高度重新按「连续 N 次失败」判定
+	if s.failures != nil {
+		s.failures.reset()
+	}
 	wait := 3 * time.Second
 	s.log.Infof("链回滚成功，数据从: %s 回滚至: %s 高度, 回滚区间：%d 等待: %s", from, s.epoch, from-s.epoch+1, wait)
 	time.Sleep(wait)

@@ -94,6 +94,8 @@ func newSyncer(conf *config.Config, db *gorm.DB, agg londobell.Agg, adapter lond
 			syncer.WithInitEpoch(conf.InitEpoch),
 			syncer.WithEpochsThreshold(*conf.Syncer.EpochsThreshold),
 			syncer.WithEpochsChunk(*conf.Syncer.EpochsChunk),
+			// 数据级错误连续 N 次失败即跳过该高度并登记（默认 5，传输级错误不受影响）
+			syncer.WithDataErrorThreshold(conf.Syncer.DataErrorThresholdValue()),
 		}, options...)...,
 	)
 	return s

@@ -50,7 +50,8 @@ func (l LondobellAdapterImpl) exec(ctx context.Context, path string, body map[st
 
 	code := j.GetInt64("code")
 	if code != 0 {
-		return nil, fmt.Errorf(string(j.GetStringBytes("msg")))
+		// 用常量格式串（原写法把 msg 当格式串，含 % 的消息会被 fmt 误解释，go vet 报 non-constant format string）
+		return nil, fmt.Errorf("%s", string(j.GetStringBytes("msg")))
 	}
 
 	return reply, nil
@@ -81,7 +82,8 @@ func (l LondobellAdapterImpl) bindResult(resp *resty.Response, result interface{
 	}
 	err = json.Unmarshal([]byte(data), result)
 	if err != nil {
-		err = fmt.Errorf("unmarshal error:%s", err)
+		// 响应体存在但无法解码：数据级错误（重试同一高度不会自愈）
+		err = &londobell.DecodeError{Err: err, URL: resp.Request.URL}
 		return
 	}
 	return
