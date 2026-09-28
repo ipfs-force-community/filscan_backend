@@ -12,6 +12,9 @@ import (
 var log = logging.NewLogger("biz")
 
 func NewBrowserBiz(agg londobell.Agg, adapter londobell.Adapter, db *gorm.DB, abiDecoder fevm.ABIDecoderAPI, conf *config.Config) *BrowserBiz {
+	// 三个统计端点的读路径开关（[feature] 段，默认全关 = 原样透传，行为与改造前一致）。
+	// 只包 API 侧：同步器用的 agg 不受影响（见 agg_pg_reward.go 文件头）。
+	agg = NewPgRewardAgg(agg, db, conf)
 	return &BrowserBiz{
 		IndexBiz:          NewIndexBiz(agg, adapter, db, conf),
 		BlockChainBiz:     NewBlockChainBiz(agg, adapter, db, conf),

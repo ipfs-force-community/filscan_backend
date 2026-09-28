@@ -85,6 +85,19 @@ type RewardTask interface {
 	DeleteMinerRewardStats(ctx context.Context, gteEpoch chain.Epoch) (err error)
 }
 
+type MinerRewardRange interface {
+	// MinerBlockRewardRange 逐 epoch 出块奖励（单矿工），区间左闭右开 [start, end)，
+	// 对齐聚合器端点 miner_blockreward 的分组口径（按 epoch 分组，按 epoch 升序返回）。
+	MinerBlockRewardRange(ctx context.Context, miner string, start, end chain.Epoch) (items []*bo.MinerEpochReward, err error)
+	// MinersBlockRewardRange 逐 epoch 逐矿工出块奖励，区间左闭右开 [start, end)，
+	// 对齐聚合器端点 miners_blockreward（按 epoch+miner 分组，按 epoch、miner 升序返回）。
+	MinersBlockRewardRange(ctx context.Context, start, end chain.Epoch) (items []*bo.MinerEpochReward, err error)
+	// MinerWinCountsRange 逐矿工 winCount 区间汇总 [start, end)，
+	// 对齐聚合器端点 wincount（按 miner 分组，按 miner 升序返回）。
+	// 注意：聚合器该端点还返回 TotalGasReward，PG 侧无对应列（见 dal 注释）。
+	MinerWinCountsRange(ctx context.Context, start, end chain.Epoch) (items []*bo.AccWinCount, err error)
+}
+
 type BaseFeeTrendBizRepo interface {
 	GetStatBaseGasCost(ctx context.Context, epochs []chain.Epoch) (costs []*stat.BaseGasCost, err error)
 }
