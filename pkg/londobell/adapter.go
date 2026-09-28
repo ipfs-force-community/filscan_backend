@@ -80,15 +80,16 @@ type RewardActorState struct {
 	TotalStoragePowerReward decimal.Decimal
 	SimpleTotal             decimal.Decimal
 	BaselineTotal           decimal.Decimal
-	// NV29(Solstice) 起，TotalStoragePowerReward 改名为 TotalMintedReward（同值）
-	TotalMintedReward decimal.Decimal
+	// NV29(Solstice) 起：TotalStoragePowerReward 改名为 TotalMintedReward（全部铸造量），
+	// 另新增销毁与显式流的累计量；SimpleTotal/BaselineTotal 已从状态移到代码常量。
+	TotalMintedReward   decimal.Decimal
+	TotalBurnMinted     decimal.Decimal
+	TotalExplicitMinted decimal.Decimal
 }
 
-// NormalizeNV29 把 NV29 的新字段名回填到旧字段，保证升级前后读取逻辑一致。
-func (r *RewardActorState) NormalizeNV29() {
-	if r.TotalStoragePowerReward.IsZero() && !r.TotalMintedReward.IsZero() {
-		r.TotalStoragePowerReward = r.TotalMintedReward
-	}
+// MinerMinted 返回「发给出块者的奖励」，即 filscan 的「出块奖励」口径（NV29 前后统一）。
+func (r RewardActorState) MinerMinted() decimal.Decimal {
+	return minerMinted(r.TotalStoragePowerReward, r.TotalMintedReward, r.TotalBurnMinted, r.TotalExplicitMinted)
 }
 
 type PowerActorState struct {
