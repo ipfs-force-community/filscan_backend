@@ -226,10 +226,12 @@ func (m Mapper) SaveTransfers(ctx context.Context, items []*po.NFTTransfer) (err
 		if _, ok := cids[v.Cid]; ok {
 			continue
 		}
-		// 上面的 cid 幂等只在「同一批里同 epoch 已存在」时有效：并发/重叠回放时两个 worker
-		// 可能都看不到对方已写入的行，最终得靠库侧唯一约束兜底。这里冲突即忽略，
-		// 否则唯一键报错会让该高度任务失败并被无限重试。
-		err = tx.Clauses(clause.OnConflict{DoNothing: true}).Create(v).Error
+		// 库侧兜底这条路走不通：fevm.nft_transfers 上有 INSERT 规则
+		// （range_insert_action_rule ⇒ fevm.action_nft_transfers_range_insert），PG 对带
+		// INSERT/UPDATE 规则的表禁止 ON CONFLICT（SQLSTATE 0A000），加上会让每一次写入都
+		// 报错、该高度任务失败并被框架无限重试。幂等只能靠上面的 cid 先查后跳
+		// （该表主键是 (epoch, cid)，所以认行的键就是 cid）。
+		err = tx.Create(v).Error
 		if err != nil {
 			return
 		}

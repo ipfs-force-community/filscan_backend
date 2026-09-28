@@ -5,6 +5,8 @@ import (
 	"database/sql"
 	"database/sql/driver"
 	"errors"
+	"fmt"
+	"io"
 	"strings"
 	"sync"
 	"testing"
@@ -18,13 +20,15 @@ import (
 	"gitlab.forceup.in/fil-data-factory/filscan-backend/modules/common/infra/po"
 )
 
-// 这些用例只验「真正会发给 PG 的 SQL」：用 gorm 的 DryRun 生成语句 + 捕获 logger.Trace，
-// 完全不连库、不依赖 PG 实例。
+// 这些用例只验「真正会发给 PG 的 SQL」，全程不连库、不依赖 PG 实例。
 //
-// 背景：fevm.nft_transfers 没有唯一键，回放/同步重试会把整行重复写进去（实测一次分片
-// 重跑产生 14,122 行重复）。SaveTransfers 里的应用层 cid 幂等只在「同一批里同 epoch
-// 已存在」时有效，并发/重叠重放时两个 worker 可能都看不到对方，最终得靠库侧唯一约束兜底，
-// 因此插入必须冲突即忽略。
+// 为什么 nft 写入只能是应用层「先查后跳」（cid）、绝不能出现 ON CONFLICT：
+// fevm.nft_transfers 上有 INSERT 规则（range_insert_action_rule ⇒
+// fevm.action_nft_transfers_range_insert，fevm_bak 里还有一份影子），PG 对带 INSERT/UPDATE
+// 规则的表直接禁止 ON CONFLICT（SQLSTATE 0A000: INSERT with ON CONFLICT clause cannot be
+// used with table that has INSERT or UPDATE rules）——实测加了它以后重跑已写过的 100 个高度
+// 全红、框架无限重试。该表主键是 (epoch, cid)，所以认行的键就是 cid。
+// TestSaveTransfersSQLHasNoOnConflict 就是防后来人再把 ON CONFLICT 加回来的回归护栏。
 
 // sqlCapture 实现 gorm.io/gorm/logger.Interface，只把生成的 SQL 记下来。
 type sqlCapture struct {
@@ -111,9 +115,20 @@ func insertStatements(sqls []string) (out []string) {
 	return
 }
 
-// TestSaveTransfersUsesOnConflictDoNothing 每条 NFT 转账插入都必须带 ON CONFLICT DO NOTHING：
-// 唯一键缺失时它是无副作用的未来防护，唯一键补齐后它就是重跑幂等的保证。
-func TestSaveTransfersUsesOnConflictDoNothing(t *testing.T) {
+// requireNoOnConflict 回归护栏：任何一条真正会发给 PG 的 SQL 都不许带 ON CONFLICT ——
+// nft_transfers 上有 INSERT 规则，PG 会直接报 SQLSTATE 0A000 让写入全部失败卡死高度。
+func requireNoOnConflict(t *testing.T, sqls []string) {
+	t.Helper()
+	for i, s := range sqls {
+		require.NotContains(t, strings.ToUpper(s), "ON CONFLICT",
+			"第 %d 条 SQL 不得出现 ON CONFLICT：表上有 INSERT 规则，PG 直接报 SQLSTATE 0A000: %s", i+1, s)
+	}
+}
+
+// TestSaveTransfersSQLHasNoOnConflict 回归护栏 + 守卫接线：
+// 先按本批 epoch 查已有 cid（应用层先查后跳，原样保留），再逐行插入；
+// 任何 SQL 都不许出现 ON CONFLICT。
+func TestSaveTransfersSQLHasNoOnConflict(t *testing.T) {
 
 	db, cap := dryRunDB(t)
 	m := NewMapper(db)
@@ -126,17 +141,21 @@ func TestSaveTransfersUsesOnConflictDoNothing(t *testing.T) {
 	require.NoError(t, m.SaveTransfers(context.Background(), items))
 
 	sqls := cap.All()
-	require.Contains(t, sqls[0], "SELECT", "应用层 cid 幂等逻辑必须原样保留（先查同 epoch 已有 cid）")
+	requireNoOnConflict(t, sqls)
+
+	require.NotEmpty(t, sqls)
+	require.Contains(t, sqls[0], "SELECT", "应用层 cid 先查后跳逻辑必须原样保留（先查同 epoch 已有 cid）")
+	require.Contains(t, sqls[0], "nft_transfers")
+	require.Contains(t, sqls[0], `"cid"`)
+	require.Contains(t, sqls[0], "6312687", "守卫必须按本批 epoch 过滤")
 
 	inserts := insertStatements(sqls)
 	require.Len(t, inserts, 2, "两条转账各自插入（逐行写入逻辑不变）")
 	for i, insert := range inserts {
 		t.Logf("第 %d 条插入 SQL: %s", i+1, insert)
 		require.Contains(t, insert, "nft_transfers")
-		require.Contains(t, insert, "ON CONFLICT DO NOTHING",
-			"缺了它，重叠回放会重复写整行、并在补唯一键后硬报错卡死该高度: %s", insert)
-		require.NotContains(t, insert, "ON CONFLICT (",
-			"不得指定冲突列：冲突应交给库侧唯一约束兜底: %s", insert)
+		require.Contains(t, insert, `"cid"`)
+		require.Contains(t, insert, "bafyNft")
 	}
 }
 
@@ -148,5 +167,179 @@ func TestSaveTransfersEmptyItemsNoSQL(t *testing.T) {
 
 	require.NoError(t, m.SaveTransfers(context.Background(), nil))
 
-	require.Empty(t, insertStatements(cap.All()), "空批次不得产生插入语句")
+	sqls := cap.All()
+	requireNoOnConflict(t, sqls)
+	require.Empty(t, insertStatements(sqls), "空批次不得产生插入语句")
+}
+
+// ------------------------------------------------------- 守卫接线的假驱动用例
+//
+// 上面 DryRun 的守卫查询拿不到任何行，只能证明「发了这条查询」；下面这个最简假驱动直接回答
+// 守卫查询（返回预设的「库里已有 cid」），证明先查后跳确实生效：已有的 cid 不再插入。
+
+type fakeGuardExec struct {
+	sql  string
+	args []driver.Value
+}
+
+type fakeGuardFixture struct {
+	existingCids [][]driver.Value // 守卫查询返回的行：cid
+	queries      []string
+	execs        []fakeGuardExec
+	mu           sync.Mutex
+}
+
+func (f *fakeGuardFixture) recordQuery(sql string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.queries = append(f.queries, sql)
+}
+
+func (f *fakeGuardFixture) recordExec(sql string, args []driver.Value) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.execs = append(f.execs, fakeGuardExec{sql: sql, args: args})
+}
+
+func (f *fakeGuardFixture) AllQueries() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	out := make([]string, len(f.queries))
+	copy(out, f.queries)
+	return out
+}
+
+func (f *fakeGuardFixture) AllExecs() []fakeGuardExec {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	out := make([]fakeGuardExec, len(f.execs))
+	copy(out, f.execs)
+	return out
+}
+
+type fakeGuardDriver struct{}
+
+var (
+	registerGuardDriverOnce sync.Once
+	guardFixtureMu          sync.Mutex
+	guardFixture            *fakeGuardFixture
+)
+
+func (fakeGuardDriver) Open(string) (driver.Conn, error) {
+	guardFixtureMu.Lock()
+	defer guardFixtureMu.Unlock()
+	return &fakeGuardConn{fixture: guardFixture}, nil
+}
+
+type fakeGuardConn struct{ fixture *fakeGuardFixture }
+
+func (c *fakeGuardConn) Prepare(query string) (driver.Stmt, error) {
+	return &fakeGuardStmt{query: query, fixture: c.fixture}, nil
+}
+func (c *fakeGuardConn) Close() error              { return nil }
+func (c *fakeGuardConn) Begin() (driver.Tx, error) { return noopTx{}, nil }
+func (c *fakeGuardConn) BeginTx(context.Context, driver.TxOptions) (driver.Tx, error) {
+	return noopTx{}, nil
+}
+
+type fakeGuardStmt struct {
+	query   string
+	fixture *fakeGuardFixture
+}
+
+func (s *fakeGuardStmt) Close() error  { return nil }
+func (s *fakeGuardStmt) NumInput() int { return -1 }
+
+func (s *fakeGuardStmt) Exec(args []driver.Value) (driver.Result, error) {
+	s.fixture.recordExec(s.query, args)
+	return driver.RowsAffected(1), nil
+}
+
+func (s *fakeGuardStmt) Query([]driver.Value) (driver.Rows, error) {
+	s.fixture.recordQuery(s.query)
+	return &fakeGuardRows{cols: []string{"cid"}, rows: s.fixture.existingCids}, nil
+}
+
+type fakeGuardRows struct {
+	cols []string
+	rows [][]driver.Value
+	i    int
+}
+
+func (r *fakeGuardRows) Columns() []string { return r.cols }
+func (r *fakeGuardRows) Close() error      { return nil }
+func (r *fakeGuardRows) Next(dest []driver.Value) error {
+	if r.i >= len(r.rows) {
+		return io.EOF
+	}
+	copy(dest, r.rows[r.i])
+	r.i++
+	return nil
+}
+
+// guardDB 返回一个假驱动支撑的 *gorm.DB：守卫查询一律返回现有 cid，其余语句只记录。
+func guardDB(t *testing.T, existingCids [][]driver.Value) (*gorm.DB, *fakeGuardFixture) {
+	t.Helper()
+
+	registerGuardDriverOnce.Do(func() { sql.Register("hermes_guard_fake_nft", fakeGuardDriver{}) })
+
+	fixture := &fakeGuardFixture{existingCids: existingCids}
+	guardFixtureMu.Lock()
+	guardFixture = fixture
+	guardFixtureMu.Unlock()
+
+	db, err := gorm.Open(postgres.New(postgres.Config{
+		DriverName: "hermes_guard_fake_nft",
+		DSN:        "hermes-guard-nft",
+	}), &gorm.Config{
+		DisableAutomaticPing: true,
+		Logger:               gormlogger.Default.LogMode(gormlogger.Silent),
+	})
+	require.NoError(t, err)
+	return db, fixture
+}
+
+// TestSaveTransfersSkipsExistingCids 同 epoch 已有 cid（重叠回放）：
+// 守卫把它们全部跳过，一条 INSERT 都不许发。
+func TestSaveTransfersSkipsExistingCids(t *testing.T) {
+
+	db, f := guardDB(t, [][]driver.Value{{"bafyNftOne"}, {"bafyNftTwo"}})
+	m := NewMapper(db)
+
+	require.NoError(t, m.SaveTransfers(context.Background(), []*po.NFTTransfer{
+		{Epoch: 6312687, Cid: "bafyNftOne", Contract: goodContract, From: "0x1", To: "0x2", TokenId: tokenIdTopic},
+		{Epoch: 6312687, Cid: "bafyNftTwo", Contract: goodContract, From: "0x1", To: "0x3", TokenId: tokenIdTopic},
+	}))
+
+	queries := f.AllQueries()
+	require.Len(t, queries, 1, "必须先按 epoch 查一次已有 cid")
+	require.Contains(t, queries[0], "nft_transfers")
+
+	require.Empty(t, f.AllExecs(), "已有 cid 的转账不得再插入（重叠回放幂等）")
+}
+
+// TestSaveTransfersInsertsOnlyMissingCids 只有缺的那一行会被写，已有的 cid 不重复写。
+func TestSaveTransfersInsertsOnlyMissingCids(t *testing.T) {
+
+	db, f := guardDB(t, [][]driver.Value{{"bafyKeep"}})
+	m := NewMapper(db)
+
+	require.NoError(t, m.SaveTransfers(context.Background(), []*po.NFTTransfer{
+		{Epoch: 6312687, Cid: "bafyKeep", Contract: goodContract, From: "0x1", To: "0x2", TokenId: tokenIdTopic},
+		{Epoch: 6312687, Cid: "bafyNew", Contract: goodContract, From: "0x1", To: "0x3", TokenId: tokenIdTopic},
+	}))
+
+	execs := f.AllExecs()
+	require.Len(t, execs, 1, "只有缺的那一行会被写入")
+
+	sqls := make([]string, 0, len(execs))
+	for _, e := range execs {
+		sqls = append(sqls, e.sql)
+	}
+	requireNoOnConflict(t, sqls)
+	require.Contains(t, sqls[0], "nft_transfers")
+
+	joined := fmt.Sprint(execs[0].args)
+	require.Contains(t, joined, "bafyNew")
+	require.NotContains(t, joined, "bafyKeep", "已在库的行不得重复插入")
 }
