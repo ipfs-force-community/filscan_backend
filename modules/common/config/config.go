@@ -24,6 +24,58 @@ type Config struct {
 	Mail                  *Mail      `toml:"mail"`
 	ALi                   *ALi       `toml:"ali"`
 	Pro                   *Pro       `toml:"pro"`
+	// Metrics 「同步落后高度 / 关键表新鲜度」指标采集器（filscan-metrics 命令）配置。
+	// 整节可省略：省略时命令使用内置默认值（内置关键表清单 + 127.0.0.1:10020 + 15s）。
+	Metrics *Metrics `toml:"metrics"`
+}
+
+// Metrics filscan-metrics 的可选配置（全部可省略）。
+type Metrics struct {
+	Address         *string  `toml:"address"`           // /metrics 监听地址，如 "127.0.0.1:10020"
+	Interval        *int64   `toml:"interval"`          // 采集/渲染缓存间隔（秒）
+	Tables          []string `toml:"tables"`            // 关键表新鲜度清单，形如 ["chain.actor_actions:epoch"]
+	LegacyDelayName *bool    `toml:"legacy_delay_name"` // 是否输出兼容旧规则的 filscan_syncer_delay_height（同口径同值）
+	QueryTimeout    *int64   `toml:"query_timeout"`     // 单条 SQL / 链头接口超时（秒）
+}
+
+// MetricsAddress 返回 /metrics 监听地址，未配置时返回 fallback。
+func (c *Config) MetricsAddress(fallback string) string {
+	if c == nil || c.Metrics == nil || c.Metrics.Address == nil || *c.Metrics.Address == "" {
+		return fallback
+	}
+	return *c.Metrics.Address
+}
+
+// MetricsIntervalSeconds 返回采集间隔（秒），未配置时返回 0（由调用方兜底）。
+func (c *Config) MetricsIntervalSeconds() int64 {
+	if c == nil || c.Metrics == nil || c.Metrics.Interval == nil || *c.Metrics.Interval <= 0 {
+		return 0
+	}
+	return *c.Metrics.Interval
+}
+
+// MetricsQueryTimeoutSeconds 返回单查询超时（秒），未配置时返回 0（由调用方兜底）。
+func (c *Config) MetricsQueryTimeoutSeconds() int64 {
+	if c == nil || c.Metrics == nil || c.Metrics.QueryTimeout == nil || *c.Metrics.QueryTimeout <= 0 {
+		return 0
+	}
+	return *c.Metrics.QueryTimeout
+}
+
+// MetricsTables 返回配置的关键表清单；未配置时返回 nil（由调用方使用内置清单）。
+func (c *Config) MetricsTables() []string {
+	if c == nil || c.Metrics == nil {
+		return nil
+	}
+	return c.Metrics.Tables
+}
+
+// MetricsLegacyDelayName 返回是否输出兼容旧规则的旧指标名；未配置时返回 nil。
+func (c *Config) MetricsLegacyDelayName() *bool {
+	if c == nil || c.Metrics == nil {
+		return nil
+	}
+	return c.Metrics.LegacyDelayName
 }
 
 type Londobell struct {
@@ -49,6 +101,19 @@ type Syncer struct {
 	EnableSyncers   []string `toml:"enable_syncers"` // 开启的同步器列表
 	EpochsChunk     *int64   `toml:"epochs_chunk"`
 	EpochsThreshold *int64   `toml:"epochs_threshold"`
+	// DataErrorThreshold 数据级错误（聚合器业务码 code:1、响应体解码失败等不可恢复错误）
+	// 连续失败多少次后，登记并跳过该高度继续往下同步；传输级错误（网络/超时）不受此配置影响，
+	// 始终按原有逻辑重试。未配置或 <=0 时取同步器内置默认值 5。
+	DataErrorThreshold *int64 `toml:"data_error_threshold"`
+}
+
+// DataErrorThresholdValue 返回配置的「数据级错误跳过阈值」；未配置时返回 0（由同步器回退到内置默认值 5）。
+// 用方法而不是直接解引用指针：老配置文件里没有该字段时不应 panic。
+func (s *Syncer) DataErrorThresholdValue() int64 {
+	if s == nil || s.DataErrorThreshold == nil {
+		return 0
+	}
+	return *s.DataErrorThreshold
 }
 
 type Mail struct {
