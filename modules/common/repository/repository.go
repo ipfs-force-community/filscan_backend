@@ -356,3 +356,18 @@ type CapitalRepo interface {
 	GetLatestBalanceBeforeEpoch(ctx context.Context, address string, epoch *chain.Epoch) (balance decimal.Decimal, err error)
 	GetLatestBalanceAfterEpoch(ctx context.Context, address string, epoch *chain.Epoch) (balance decimal.Decimal, err error)
 }
+
+// LargeTransferRepo 大额转账预计算表 chain.large_transfers 的**增量维护**仓储（写入侧）。
+//
+// 实现约定（唯一的维护入口，幂等与失败策略都靠它）：
+//   - 没有主键、不能建唯一索引（线上口径要在同一高度同一 cid 上保留 trace 行重数），
+//     所以不做 upsert；ReplaceLargeTransfers 必须在**同一个事务**里先 delete 后批量 insert，
+//     否则崩溃/回滚会留下半截或重复行；
+//   - 同一高度重复调用（重试、回放）后的表内容必须与只调一次完全相同（delete-then-insert 天然满足）。
+type LargeTransferRepo interface {
+	// ReplaceLargeTransfers 用 items 整体替换该高度已有的行（先按 epoch 删除，再批量插入，同一事务）。
+	// items 为空表示「该高度没有大额转账」：仍然要执行删除（清掉该高度可能残留的旧行），只是不插入。
+	ReplaceLargeTransfers(ctx context.Context, epoch int64, items []*po.LargeTransfer) (err error)
+	// DeleteLargeTransfersFromEpoch 删除 >= gteEpoch 的行（链回滚时用；重跑会按 delete-then-insert 重写）。
+	DeleteLargeTransfersFromEpoch(ctx context.Context, gteEpoch chain.Epoch) (err error)
+}
