@@ -52,46 +52,15 @@ func (e *ERC20Task) Exec(ctx *syncer.Context) (err error) {
 
 	var multiErr multierror.Error
 
-	// find all subcalls include evm
-	idx := map[string]struct{}{}
-	for i := range traces {
-		if traces[i] == nil {
-			continue
-		}
-		ss := strings.Split(traces[i].Actor, "/")
-		if len(ss) != 0 && (ss[len(ss)-1] == "evm" || ss[len(ss)-1] == "eam") {
-			ss := strings.Split(traces[i].ID, "-")
-			if len(ss) < 2 {
-				log.Error("split trace id, len less than 2", traces[i].ID)
-				continue
-			}
-			idx[ss[1]] = struct{}{}
-		}
-	}
+	targets := e.selectHandleTraces(ctx, traces)
 
 	wg := sync.WaitGroup{}
-	errChan := make(chan error, len(traces))
-	resBalancesChan := make(chan []*po.FEvmERC20Balance, len(traces))
-	resSwapInfoChan := make(chan []*po.FEvmERC20SwapInfo, len(traces))
-	resTransfersChan := make(chan []*po.FEvmERC20Transfer, len(traces))
+	errChan := make(chan error, len(targets))
+	resBalancesChan := make(chan []*po.FEvmERC20Balance, len(targets))
+	resSwapInfoChan := make(chan []*po.FEvmERC20SwapInfo, len(targets))
+	resTransfersChan := make(chan []*po.FEvmERC20Transfer, len(targets))
 	limitChan := make(chan struct{}, 16)
-	for _, v := range traces {
-		if v == nil {
-			continue
-		}
-
-		if v.Depth != 1 {
-			continue
-		}
-		ss := strings.Split(v.ID, "-")
-		if len(ss) < 2 {
-			log.Error("split trace id, len less than 2", v.ID)
-			continue
-		}
-
-		if _, ok := idx[ss[1]]; !ok {
-			continue
-		}
+	for _, v := range targets {
 		wg.Add(1)
 		v := v
 		limitChan <- struct{}{}
@@ -171,6 +140,84 @@ func (e *ERC20Task) Exec(ctx *syncer.Context) (err error) {
 		multiErr = *multierror.Append(&multiErr, err)
 	}
 	return multiErr.ErrorOrNil()
+}
+
+// selectHandleTraces 选出本高度需要解析交易回执的 trace（ERC20 事件只可能出现在这些 trace 上）：
+//
+//	① 该 trace 所属消息的调用树里出现过 evm/eam actor（沿用原判定，语义未变）；
+//	② 该 trace 自身执行成功（MsgRct.ExitCode == 0）—— 与 nft 侧 events.GetEvents 同一判据。
+//
+// 为什么必须判 ExitCode（主网 erc20 卡死 52 天的根因）：失败交易在链上本来就不会产生可用的
+// ERC20 事件；而聚合器对失败交易的**回执**解不出来。实测高度 6259665 的那条消息 ExitCode=21
+// （链上 ErrSerialization 失败交易），聚合器对它的 receipt 回 `code:1 expected byte array`。
+// 旧实现对每条此类 trace 都无条件调 GetTransactionReceiptByCid，取不到就把错误上抛 ⇒ 整高度
+// 判失败 ⇒ 指针原地重试，从 08-07 一路卡到今天（52 天）。
+func (e *ERC20Task) selectHandleTraces(ctx *syncer.Context, traces []*londobell.TraceMessage) (targets []*londobell.TraceMessage) {
+
+	// find all subcalls include evm
+	idx := map[string]struct{}{}
+	for i := range traces {
+		if traces[i] == nil {
+			continue
+		}
+		ss := strings.Split(traces[i].Actor, "/")
+		if len(ss) != 0 && (ss[len(ss)-1] == "evm" || ss[len(ss)-1] == "eam") {
+			ss := strings.Split(traces[i].ID, "-")
+			if len(ss) < 2 {
+				log.Error("split trace id, len less than 2", traces[i].ID)
+				continue
+			}
+			idx[ss[1]] = struct{}{}
+		}
+	}
+
+	for _, v := range traces {
+		if v == nil {
+			continue
+		}
+
+		if v.Depth != 1 {
+			continue
+		}
+		ss := strings.Split(v.ID, "-")
+		if len(ss) < 2 {
+			log.Error("split trace id, len less than 2", v.ID)
+			continue
+		}
+
+		if _, ok := idx[ss[1]]; !ok {
+			continue
+		}
+
+		// ② 只处理执行成功的消息：未成功的消息不解析 ERC20 事件。
+		// 这里必须**先于**取回执判断，否则失败交易的回执解码错误会把整个高度拖失败（见方法注释）。
+		// 跳过是带日志的：留痕便于事后按高度核对（不是静默丢数）。
+		if v.MsgRct == nil || v.MsgRct.ExitCode != 0 {
+			ctx.Warnf("高度 %s 跳过未成功的 EVM 消息，不解析其 ERC20 事件: trace=%s cid=%s exit_code=%s",
+				ctx.Epoch(), v.ID, traceCid(v), traceExitCode(v))
+			continue
+		}
+
+		targets = append(targets, v)
+	}
+
+	return
+}
+
+// traceCid 取 trace 对应的消息 cid（SignedCid 优先，与原取回执的入参口径一致）
+func traceCid(t *londobell.TraceMessage) string {
+	if t.SignedCid != nil && *t.SignedCid != "" {
+		return *t.SignedCid
+	}
+	return t.Cid
+}
+
+// traceExitCode 取 trace 的退出码文本，无回执时如实标注（避免日志里出现「0」这种误导值）
+func traceExitCode(t *londobell.TraceMessage) string {
+	if t.MsgRct == nil {
+		return "nil(无回执)"
+	}
+	return fmt.Sprintf("%d", t.MsgRct.ExitCode)
 }
 
 func (e *ERC20Task) handleFreshErc20Tokens(ctx context.Context) error {
@@ -433,8 +480,18 @@ func (e *ERC20Task) handleERC20Transfer(ctx *syncer.Context, trace *londobell.Tr
 		return nil, nil, nil, nil
 	}
 	if err != nil {
-		log.Error(err)
-		return nil, nil, nil, fmt.Errorf("get transaction receipt by cid failed: %w", err)
+		// ① 传输级错误（聚合器不通/超时）仍然上抛：那是暂时的，重试即可，
+		// 且不会被「连续 N 次失败即跳过」防线计入（分类为 transport 不为数据级）。
+		if syncer.ClassifySyncError(err) == syncer.ErrorKindTransport {
+			return nil, nil, nil, fmt.Errorf("get transaction receipt by cid failed: %w", err)
+		}
+		// ② 其余（回执存在但解不出来）降级成可诊断的 Warn 并跳过这一条 trace，
+		// **不再让单个 trace 的回执问题把整个高度判失败** —— 旧实现就是在这里上抛，
+		// 于是失败交易（ExitCode!=0，聚合器回 code:1 expected byte array）把 erc20 卡了 52 天。
+		// 跳过有日志留痕（含高度/cid/退出码），本高度其余 trace 照常入库。
+		ctx.Warnf("高度 %s 取交易回执失败，跳过该条 trace（不影响本高度其它 trace）: cid=%s exit_code=%s err=%s",
+			ctx.Epoch(), cids, traceExitCode(trace), err)
+		return nil, nil, nil, nil
 	}
 	if receipt == nil || 0 == len(receipt.Logs) {
 		return nil, nil, nil, nil
