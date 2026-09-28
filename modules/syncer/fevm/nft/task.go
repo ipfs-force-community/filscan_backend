@@ -3,6 +3,7 @@ package nft
 import (
 	"context"
 	"fmt"
+	logging "github.com/gozelle/logger"
 	"github.com/gozelle/async/parallel"
 	"github.com/shopspring/decimal"
 	"gitlab.forceup.in/fil-data-factory/filscan-backend/modules/common/infra/po"
@@ -16,6 +17,9 @@ import (
 	"io"
 	"strings"
 )
+
+// log 本包的日志器（原有跳过路径无任何日志，属静默丢数；见 collectTransfers）
+var log = logging.NewLogger("nft")
 
 func NewNFTTask(db *gorm.DB, decoder fevm.ABIDecoderAPI) *NFTTask {
 	
@@ -89,18 +93,40 @@ func (e NFTTask) Exec(ctx *syncer.Context) (err error) {
 	}
 	
 	var transfers []*po.NFTTransfer
-	
+
+	transfers, err = e.collectTransfers(ctx.Epoch().Int64(), es)
+	if err != nil {
+		return
+	}
+
+	err = e.save(ctx.Context(), transfers)
+	if err != nil {
+		return
+	}
+
+	return
+}
+
+// collectTransfers 把一批 ERC721 transfer 事件整理成待入库记录。
+//
+// 抽出来只为可测（循环体与原来逐字一致，唯一变化是下面那条 Warn 日志）：原实现里
+// prepareErc721Token 返回 (nil, nil)（合约不是可解析的 ERC721，decoder 报 not found /
+// contract reverted）时直接 continue —— 无日志、无台账、指针照走，属于静默丢数路径，
+// 事后无法从日志定位「哪些合约的哪些 token 被丢了」。这里补上带 epoch/合约/token_id
+// 的 Warn 留痕，业务语义不变（仍然跳过该事件，不影响本高度其余事件）。
+func (e NFTTask) collectTransfers(epoch int64, es []*events.Event) (transfers []*po.NFTTransfer, err error) {
+
 	for _, v := range es {
 		// 处理所有 erc721-metadata transfer 事件
-		
+
 		if v.Topics[0] != "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef" {
 			continue
 		}
-		
+
 		if len(v.Topics) != 4 {
 			continue
 		}
-		
+
 		// 检查合约类型是否为 erc721-metadata,
 		var token *po.NFTToken
 		token, err = prepareErc721Token(e.decoder, e.abi, v.Address, v.Topics[3])
@@ -108,23 +134,23 @@ func (e NFTTask) Exec(ctx *syncer.Context) (err error) {
 			return
 		}
 		if token == nil {
+			// 该合约取不到 ERC721 元数据（不是 ERC721 / 合约已自毁 / 未实现 metadata）。
+			// 跳过是正确的，但不能静默：留一条带 epoch、合约、token_id、消息 cid 的 Warn，
+			// 便于事后核对「某高度某合约某 token 的转账是否真的丢了」。
+			log.Warnf("epoch %d 跳过 NFT transfer 事件：合约取不到 ERC721 元数据（token 准备为空，非可解析 ERC721）: contract=%s token_id=%s cid=%s tx=%s",
+				epoch, v.Address, v.Topics[3], v.XCid, v.TransactionHash)
 			continue
 		}
-		
+
 		var transfer *po.NFTTransfer
-		transfer, err = e.prepareErc721Transfer(ctx.Epoch().Int64(), v)
+		transfer, err = e.prepareErc721Transfer(epoch, v)
 		if err != nil {
 			return
 		}
-		
+
 		transfers = append(transfers, transfer)
 	}
-	
-	err = e.save(ctx.Context(), transfers)
-	if err != nil {
-		return
-	}
-	
+
 	return
 }
 
