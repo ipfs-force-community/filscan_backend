@@ -51,10 +51,14 @@ build-monitor:
 	make generate
 	mkdir -p bin/ && go build --tags=bundle -ldflags "-X main.Version=$(VERSION) -X main.Name=filscan-monitor" -o ./bin/monitor ./cmd/monitor
 
-build: build-syncer build-api build-abi-decoder build-monitor 
+# 同步落后高度 / 关键表新鲜度指标采集器（口径修正后的监控数据源）
+build-metrics:
+	mkdir -p bin/ && go build --tags=bundle -ldflags "-X main.Version=$(VERSION) -X main.Name=filscan-metrics" -o ./bin/metrics ./cmd/metrics
+
+build: build-syncer build-api build-abi-decoder build-monitor build-metrics
 .PHONY: build
 
-build-calib: build-calib-syncer build-calib-api build-calib-abi-decoder build-calib-monitor
+build-calib: build-calib-syncer build-calib-api build-calib-abi-decoder build-calib-monitor build-calib-metrics
 .PHONY: build-calib
 
 build-calib-api:
@@ -73,6 +77,9 @@ build-calib-abi-decoder:
 build-calib-monitor:
 	make generate
 	mkdir -p bin/ && go build --tags=bundle,calibnet -ldflags "-X main.Version=$(VERSION_CALIB) -X main.Name=filscan-monitor" -o ./bin/monitor ./cmd/monitor
+
+build-calib-metrics:
+	mkdir -p bin/ && go build --tags=bundle,calibnet -ldflags "-X main.Version=$(VERSION_CALIB) -X main.Name=filscan-metrics" -o ./bin/metrics ./cmd/metrics
 
 run-api:
 	go run cmd/filscan/filscan.go cmd/filscan/wire_gen.go -c configs/local.toml
