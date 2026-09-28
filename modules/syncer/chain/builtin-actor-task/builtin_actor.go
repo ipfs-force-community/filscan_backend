@@ -103,6 +103,8 @@ func (b BaselineTask) getRewardActorState(ctx context.Context, adapter londobell
 	if err != nil {
 		return
 	}
+	// NV29(Solstice)：新状态用 TotalMintedReward，回填旧字段名，保证写入 chain.builtin_actor_states 的状态字段完整
+	state.NormalizeNV29()
 
 	return
 }

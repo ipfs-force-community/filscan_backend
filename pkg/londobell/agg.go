@@ -363,6 +363,16 @@ type RewardActorDetail struct {
 	ThisEpochReward         decimal.Decimal   `json:"ThisEpochReward"`
 	ThisEpochRewardSmoothed ThisEpochSmoothed `json:"ThisEpochRewardSmoothed"`
 	TotalStoragePowerReward decimal.Decimal   `json:"TotalStoragePowerReward"`
+	// NV29(Solstice) 起，奖励 actor 的 TotalStoragePowerReward 被改名为 TotalMintedReward（同一个值、语义不变）。
+	// 见 lotus v1.37.0-rc1 itests/solstice_reward_test.go: req.Equal(pre.TotalStoragePowerReward, migrated.TotalMintedReward)
+	TotalMintedReward decimal.Decimal `json:"TotalMintedReward"`
+}
+
+// NormalizeNV29 把 NV29 的新字段名回填到旧字段，保证既有读取逻辑（总奖励、近24h出块奖励）在升级前后一致。
+func (r *RewardActorDetail) NormalizeNV29() {
+	if r.TotalStoragePowerReward.IsZero() && !r.TotalMintedReward.IsZero() {
+		r.TotalStoragePowerReward = r.TotalMintedReward
+	}
 }
 
 type ThisEpochSmoothed struct {
