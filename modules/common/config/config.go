@@ -51,6 +51,12 @@ type Feature struct {
 	// 改读 PG 表 chain.miner_win_counts。注意：PG 无 gas_reward 列，开启后
 	// TotalGasReward 恒为 0（详见 agg_pg_reward.go 的说明与 parity 工具的 UNRESOLVED 字段）。
 	MinerWinCountReadFromPg *bool `toml:"miner_wincount_read_from_pg"`
+	// LargeAmountReadFromPg 聚合器端点 transfer_message_for_largeAmount（大额转账列表，FIL>=10000）
+	// 改读 PG 表 chain.large_transfers（migration/35.large_transfers.sql）。
+	// 注意：该端点只吃 index/limit（没有高度区间），TotalCount 是**全表行数**（不去重）；
+	// 同高度内行序线上未定义，PG 侧按 (epoch desc, cid asc) 定序（详见 dal 文件头与
+	// agg_pg_large_amount.go）。开启前必须先跑 `filscan-agg-parity -endpoints large_amount`。
+	LargeAmountReadFromPg *bool `toml:"large_amount_read_from_pg"`
 	// PgReadTimeoutMs 单次 PG 读的超时（毫秒，0 或未配置 = 内置默认 5000ms；<0 = 不设超时）。
 	PgReadTimeoutMs *int64 `toml:"pg_read_timeout_ms"`
 }
@@ -73,6 +79,11 @@ func (c *Config) MinersBlockRewardReadFromPg() bool {
 // MinerWinCountReadFromPg 是否让 wincount 走 PG；未配置 = false（走聚合器）。
 func (c *Config) MinerWinCountReadFromPg() bool {
 	return c != nil && c.Feature != nil && boolValue(c.Feature.MinerWinCountReadFromPg)
+}
+
+// LargeAmountReadFromPg 是否让大额转账列表走 PG；未配置 = false（走聚合器）。
+func (c *Config) LargeAmountReadFromPg() bool {
+	return c != nil && c.Feature != nil && boolValue(c.Feature.LargeAmountReadFromPg)
 }
 
 // PgReadDefaultTimeoutMs PG 读默认超时（毫秒）。未配置时用它。

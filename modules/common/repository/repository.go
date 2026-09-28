@@ -98,6 +98,20 @@ type MinerRewardRange interface {
 	MinerWinCountsRange(ctx context.Context, start, end chain.Epoch) (items []*bo.AccWinCount, err error)
 }
 
+// LargeAmountTransfer 大额转账列表端点（/aggregators/transfer_message_for_largeAmount）
+// 的 PG 读实现。该端点只吃 index/limit（没有高度区间），口径详见
+// modules/common/infra/dal/dal_biz_large_transfer.go 的文件头注释。
+type LargeAmountTransfer interface {
+	// LargeTransfersPage 取一页大额转账，按 (epoch desc, cid asc) 定序；
+	// offset/limit 由 dal.LargeTransferPageWindow(index, limit) 从请求的 index/limit 折算。
+	// 空页返回 nil（调用方据此复现聚合器 data:null 的形态），不是错误。
+	LargeTransfersPage(ctx context.Context, offset, limit int64) (items []*bo.LargeTransferRow, err error)
+	// CountLargeTransfers 全表行数（= 聚合器 TotalCount 对照值）。
+	// 关键口径：**count(*) 不去重**、**不按高度区间过滤**（表不存区间，请求也不带区间），
+	// 见 dal 注释里的三条理由。
+	CountLargeTransfers(ctx context.Context) (total int64, err error)
+}
+
 type BaseFeeTrendBizRepo interface {
 	GetStatBaseGasCost(ctx context.Context, epochs []chain.Epoch) (costs []*stat.BaseGasCost, err error)
 }

@@ -26,6 +26,9 @@ func TestFeatureSwitchesDefaultOff(t *testing.T) {
 			if c.conf.MinerWinCountReadFromPg() {
 				t.Error("MinerWinCountReadFromPg 默认应为 false")
 			}
+			if c.conf.LargeAmountReadFromPg() {
+				t.Error("LargeAmountReadFromPg 默认应为 false")
+			}
 			if got := c.conf.PgReadTimeoutMs(); got != PgReadDefaultTimeoutMs {
 				t.Errorf("PgReadTimeoutMs 默认应为 %d，得到 %d", PgReadDefaultTimeoutMs, got)
 			}
@@ -38,6 +41,7 @@ func TestFeatureSwitchesOn(t *testing.T) {
 		MinerBlockRewardReadFromPg:  boolPtr(true),
 		MinersBlockRewardReadFromPg: boolPtr(false),
 		MinerWinCountReadFromPg:     boolPtr(true),
+		LargeAmountReadFromPg:       boolPtr(true),
 		PgReadTimeoutMs:             int64Ptr(1500),
 	}}
 	if !conf.MinerBlockRewardReadFromPg() {
@@ -49,8 +53,19 @@ func TestFeatureSwitchesOn(t *testing.T) {
 	if !conf.MinerWinCountReadFromPg() {
 		t.Error("MinerWinCountReadFromPg 应为 true")
 	}
+	if !conf.LargeAmountReadFromPg() {
+		t.Error("LargeAmountReadFromPg 应为 true")
+	}
 	if got := conf.PgReadTimeoutMs(); got != 1500 {
 		t.Errorf("PgReadTimeoutMs 应为 1500，得到 %d", got)
+	}
+}
+
+// 显式 false 也是 false（不是「未配置」）：用于回滚时把开关写死关闭。
+func TestFeatureSwitchExplicitFalse(t *testing.T) {
+	conf := &Config{Feature: &Feature{LargeAmountReadFromPg: boolPtr(false)}}
+	if conf.LargeAmountReadFromPg() {
+		t.Error("LargeAmountReadFromPg 显式 false 应返回 false")
 	}
 }
 

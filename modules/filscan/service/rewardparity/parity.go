@@ -29,11 +29,26 @@ const (
 	EndpointMinerBlockReward  = "miner_blockreward"
 	EndpointMinersBlockReward = "miners_blockreward"
 	EndpointWinCount          = "wincount"
+	// EndpointLargeAmount 大额转账列表端点 /aggregators/transfer_message_for_largeAmount。
+	// 与上面三个不同：它只吃 index/limit（没有高度区间），TotalCount 是全表行数。
+	EndpointLargeAmount = "large_amount"
 )
 
-// AllEndpoints 默认比对全部三个端点。
+// AllEndpoints 默认比对的端点：三个统计端点。
+// 大额转账需显式 `-endpoints large_amount`：它不按高度区间取数（-start/-end 对它无意义），
+// 且线上该端点极慢（实测 60 秒零字节挂住），不适合放进默认集合。
 func AllEndpoints() []string {
 	return []string{EndpointMinerBlockReward, EndpointMinersBlockReward, EndpointWinCount}
+}
+
+// ValidEndpoints 可选择的全部端点（含大额转账），供工具做参数校验与帮助文本。
+func ValidEndpoints() []string {
+	return append(AllEndpoints(), EndpointLargeAmount)
+}
+
+// NeedsEpochRange 该端点是否按高度区间取数（只有三个统计端点需要 -start/-end）。
+func NeedsEpochRange(endpoint string) bool {
+	return endpoint != EndpointLargeAmount
 }
 
 // FieldDiff 一条字段级差异（样例）。
@@ -93,6 +108,25 @@ type Result struct {
 
 	AggErr error
 	PgErr  error
+
+	// ===== 以下字段只由大额转账端点（large_amount）填写；三个统计端点保持 0/false =====
+
+	// AggTotal / PgTotal 两侧 TotalCount 的对照值（聚合器是各冷库区间行数之和，PG 是全表 count(*)）。
+	AggTotal int64
+	PgTotal  int64
+	// TotalDiff 两侧 TotalCount 不等。默认致命；工具可用 -lenient-total 降级为提示
+	// （聚合器的计数来自另一条管线且带缓存，陈旧时差额不代表 PG 有错）。
+	TotalDiff bool
+	// OrderDiffCount 同高度内行序差异条数。这是**已知差异**（线上同高度内行序未定义，
+	// PG 侧按 (epoch desc, cid asc) 定序），默认不判失败；工具可用 -strict-order 升级为失败。
+	OrderDiffCount int
+	OrderDiffs     []string
+	// SortViolations PG 侧 epoch 倒序被破坏的条数（PG 自己的 order by 失效/表被写坏）⇒ 永远致命。
+	SortViolations int
+	SortSamples    []string
+	// PgOnlyMode true = 只跑了 PG 侧（聚合器不可用时的自检）：未与聚合器比对，
+	// AggRows/AggTotal/点位差异均无意义。
+	PgOnlyMode bool
 }
 
 // AggOnly 只在聚合器侧出现的点位样例。
@@ -117,10 +151,30 @@ func (r Result) Fatal() int {
 
 // Pass strictFormat 为真时，金额文本形态差异也算失败（「格式必须完全一致」）。
 func (r Result) Pass(strictFormat bool) bool {
-	if r.Fatal() > 0 {
+	return r.PassDetailed(strictFormat, true, false)
+}
+
+// PassDetailed 三个策略显式传入（大额转账端点需要一个「同高度内行序不算失败」的默认）：
+//
+//	strictFormat 金额/地址的**文本形态**差异是否算失败（默认 true）
+//	strictTotal  两侧 TotalCount 不等是否算失败（大额转账端点默认 true，可用 -lenient-total 关掉）
+//	strictOrder  同高度内行序差异是否算失败（默认 false：线上本就没有该顺序）
+//
+// 与数值/点位/取数有关的差异（ValueDiffCount / 点位缺失 / 排序违规 / 取数错误）永远算失败。
+func (r Result) PassDetailed(strictFormat, strictTotal, strictOrder bool) bool {
+	if r.AggErr != nil || r.PgErr != nil {
+		return false
+	}
+	if r.ValueDiffCount > 0 || r.AggOnlyCount() > 0 || r.PgOnlyCount() > 0 || r.SortViolations > 0 {
+		return false
+	}
+	if strictTotal && r.TotalDiff {
 		return false
 	}
 	if strictFormat && r.FormatOnlyDiff > 0 {
+		return false
+	}
+	if strictOrder && r.OrderDiffCount > 0 {
 		return false
 	}
 	return true
