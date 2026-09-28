@@ -62,7 +62,14 @@ func (l LondobellAggImpl) bindResult(resp *resty.Response, result interface{}) (
 	if code != "0" {
 		log.Errorf("response: %s", resp.String())
 		log.Errorf("request [%s]%s code: %s error: %s", resp.Request.Method, resp.Request.URL, code, gjson.Get(resp.String(), "msg"))
-		err = fmt.Errorf(gjson.Get(resp.String(), "msg").String())
+		// 用 BusinessError 保留业务码/接口地址：调用方需要区分「业务级错误（数据不可解析，重试不会自愈）」
+		// 与「传输级错误（网络/超时，应继续重试）」，字符串错误无法承载该判据。
+		// Error() 文本与改造前一致，不影响既有日志检索。
+		err = &londobell.BusinessError{
+			Code:    code,
+			Message: gjson.Get(resp.String(), "msg").String(),
+			URL:     resp.Request.URL,
+		}
 		return
 	}
 	data := gjson.Get(resp.String(), "data").Raw
@@ -72,7 +79,8 @@ func (l LondobellAggImpl) bindResult(resp *resty.Response, result interface{}) (
 	}
 	err = json.Unmarshal([]byte(data), result)
 	if err != nil {
-		err = fmt.Errorf("unmarshal error:%s", err)
+		// 响应体存在但无法解码：数据级错误（重试同一高度不会自愈）
+		err = &londobell.DecodeError{Err: err, URL: resp.Request.URL}
 		return
 	}
 	return
