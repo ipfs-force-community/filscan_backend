@@ -80,6 +80,15 @@ type RewardActorState struct {
 	TotalStoragePowerReward decimal.Decimal
 	SimpleTotal             decimal.Decimal
 	BaselineTotal           decimal.Decimal
+	// NV29(Solstice) 起，TotalStoragePowerReward 改名为 TotalMintedReward（同值）
+	TotalMintedReward decimal.Decimal
+}
+
+// NormalizeNV29 把 NV29 的新字段名回填到旧字段，保证升级前后读取逻辑一致。
+func (r *RewardActorState) NormalizeNV29() {
+	if r.TotalStoragePowerReward.IsZero() && !r.TotalMintedReward.IsZero() {
+		r.TotalStoragePowerReward = r.TotalMintedReward
+	}
 }
 
 type PowerActorState struct {

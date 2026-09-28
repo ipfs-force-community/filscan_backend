@@ -149,6 +149,8 @@ func (a IndexAclImpl) GetTotalEpochReward(ctx context.Context, epoch chain.Epoch
 	if err != nil {
 		return
 	}
+	// NV29(Solstice)：新状态用 TotalMintedReward，回填旧字段名
+	rewardDetail.NormalizeNV29()
 	
 	return
 }
@@ -257,6 +259,8 @@ func (a IndexAclImpl) GetTotalRewards(ctx context.Context, epoch chain.Epoch) (t
 	if err != nil {
 		return
 	}
+	// NV29(Solstice)：新状态用 TotalMintedReward，回填旧字段名
+	rewardState.NormalizeNV29()
 	totalRewards = rewardState.TotalStoragePowerReward
 	return
 }
