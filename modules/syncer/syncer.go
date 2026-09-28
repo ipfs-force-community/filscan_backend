@@ -138,6 +138,26 @@ func WithDataErrorThreshold(v int64) Option {
 	}
 }
 
+// WithUnrecoverableErrorThreshold 设置「节点侧状态不可用（不可恢复）错误连续失败多少次即跳过」的阈值。
+// 取值 <= 0 时使用默认值 defaultUnrecoverableErrorThreshold（20，15s 重试间隔下约 5 分钟）。
+// 配置项：syncer.unrecoverable_error_threshold。
+func WithUnrecoverableErrorThreshold(v int64) Option {
+	return func(conf *config) {
+		conf.unrecoverableErrorThreshold = v
+	}
+}
+
+// WithStateGapJump 设置「一次跳过整段不可恢复区间」的缺口门槛与目标 margin：
+// 缺口（链头 − 当前高度）≥ minGap 时，一次跳到 链头 − margin。
+// minGap <= 0 时用默认 1000；margin <= 0 时用默认 200。
+// 配置项：syncer.state_gap_jump_min_gap / syncer.state_gap_jump_margin。
+func WithStateGapJump(minGap, margin int64) Option {
+	return func(conf *config) {
+		conf.stateGapJumpMinGap = minGap
+		conf.stateGapJumpMargin = margin
+	}
+}
+
 // WithSkipLedger 注入「数据级错误跳过台账」读写实现（不注入时默认使用 dal.SyncerDal）
 func WithSkipLedger(ledger repository.SyncerSkipLedger) Option {
 	return func(conf *config) {
@@ -174,6 +194,11 @@ type config struct {
 	globalRollback     []func(ctx context.Context, gteEpoch chain.Epoch) error
 	dataErrorThreshold int64                       // 数据级错误连续失败多少次即跳过该高度
 	skipLedger         repository.SyncerSkipLedger // 数据级错误跳过台账（默认 dal.SyncerDal）
+	// unrecoverableErrorThreshold 节点侧状态不可用（不可恢复）错误连续失败多少次即跳过。
+	// 与 dataErrorThreshold **独立计数、独立阈值**（见 data_error.go）。
+	unrecoverableErrorThreshold int64 // 配置项：syncer.unrecoverable_error_threshold（默认 20）
+	stateGapJumpMinGap          int64 // 触发「一次跳过整段不可恢复区间」的最小缺口（默认 1000）
+	stateGapJumpMargin          int64 // 区间跳目标高度 = 链头 − margin（默认 200）
 }
 
 func isValidSyncerName(name string) bool {
@@ -246,6 +271,11 @@ type Syncer struct {
 	quit  chan struct{}
 	// failures 数据级错误「连续失败次数」计数器，达阈值后登记并跳过该高度（见 data_error.go）
 	failures *dataErrorTracker
+	// unrecoverable 节点侧状态不可用（不可恢复）错误的「连续失败次数」计数器：
+	// 与 failures 独立计数、独立阈值；达阈值后登记跳过，缺口足够大时由 sync() 一次跳过整段
+	unrecoverable *dataErrorTracker
+	// gapWarnAt 「未达区间跳门槛」告警的限频时间戳（只在 sync()/run() 单协程内读写）
+	gapWarnAt time.Time
 	*config
 }
 
@@ -278,6 +308,20 @@ func (s *Syncer) Init() (err error) {
 		s.dataErrorThreshold = defaultDataErrorThreshold
 	}
 	s.failures = newDataErrorTracker(s.dataErrorThreshold)
+
+	// 节点侧状态不可用（不可恢复）错误：**独立计数、独立阈值**，默认 20（15s 重试下约 5 分钟）
+	if s.unrecoverableErrorThreshold <= 0 {
+		s.unrecoverableErrorThreshold = defaultUnrecoverableErrorThreshold
+	}
+	s.unrecoverable = newDataErrorTracker(s.unrecoverableErrorThreshold)
+
+	// 区间跳参数：缺口门槛默认 1000、目标高度 = 链头 − margin（默认 200）
+	if s.stateGapJumpMinGap <= 0 {
+		s.stateGapJumpMinGap = defaultStateGapJumpMinGap
+	}
+	if s.stateGapJumpMargin <= 0 {
+		s.stateGapJumpMargin = defaultStateGapJumpMargin
+	}
 
 	s.repo = dal.NewSyncerDal(s.db)
 	if s.skipLedger == nil {
@@ -467,6 +511,9 @@ func (s *Syncer) run() {
 func (s *Syncer) sync(end chain.Epoch) (err error) {
 
 	start := time.Now()
+	// head 是本次传入的**链头**（run() 传的 agg final height）：下面会按 epochsThreshold 收窄
+	// 实际并发区间，但区间跳的判据与目标高度必须用真实链头，所以先留存。
+	head := end
 	if !s.dry {
 		// 检查链的一致性
 		checkStart := s.epoch - 10
@@ -499,8 +546,8 @@ func (s *Syncer) sync(end chain.Epoch) (err error) {
 
 	generate := func(epoch chain.Epoch) parallel.Runner[*po.SyncSyncerEpoch] {
 		return func(_ context.Context) (*po.SyncSyncerEpoch, error) {
-			// 已登记为「数据级坏点」的高度（见 data_error.go）：不再执行任务与上下文构建，
-			// 只回填 tipset 身份行，让链条保持连续、后续高度继续同步
+			// 已登记的坏点（数据级错误 / 节点侧不可恢复，见 data_error.go）：不再执行任务与
+			// 上下文构建，只回填 tipset 身份行，让链条保持连续、后续高度继续同步
 			if rec, ok := s.skippedEpochFailure(epoch); ok {
 				s.logSkippedEpochOnce(epoch)
 				if rec.identity == nil {
@@ -530,13 +577,21 @@ func (s *Syncer) sync(end chain.Epoch) (err error) {
 		return nil
 	})
 	if err != nil {
+		// 本批失败：可能是「节点侧不可恢复错误」（历史状态在节点侧不可用）。该类错误达阈值后
+		// 会先登记单高度跳过；若该高度到链头的缺口已达门槛（syncer.state_gap_jump_min_gap），
+		// 则在此一次跳过整个区间（跳到 链头 − syncer.state_gap_jump_margin），不再逐高度爬。
+		// 区间跳成功 ⇒ 本批的失败不再按原逻辑重试整段（s.epoch 已推进到新区间起点）。
+		if s.tryStateGapJump(head) {
+			return nil
+		}
 		return
 	}
 
 	// 一段高度追完后，则开始按高度顺序逐步执行计算任务
 	for i := s.epoch; i <= end; i++ {
 		now := time.Now()
-		// 数据级坏点：不执行计算器（其数据本就不可解析），只写身份行保持链条连续
+		// 已登记的坏点（数据级错误/节点侧不可恢复）：不执行计算器（其数据本就取不到/不可解析），
+		// 只写身份行保持链条连续
 		if _, ok := s.skippedEpochFailure(i); ok {
 			s.logSkippedEpochOnce(i)
 			if err = s.saveSkippedEpochIdentity(i, syncerEpochs[i.Int64()]); err != nil {
@@ -546,8 +601,9 @@ func (s *Syncer) sync(end chain.Epoch) (err error) {
 		}
 		err = s.execCalculators(i, syncerEpochs[i.Int64()], chain.NewLCRCRange(s.epoch, end)) // 这里要执行计算，并把同步来，从agg prepare的数据存进去。才能判断是否分叉
 		if err != nil {
-			// 计算器失败同样按高度归属：若该高度刚被判定为数据级坏点（已登记台账），
-			// 则跳过该高度继续后续高度；否则保持「失败即重试」的原有语义
+			// 计算器失败同样按高度归属（见 data_error.go）：若该高度刚被判定为坏点
+			// （数据级/节点侧不可恢复，已登记台账），则跳过该高度继续后续高度；
+			// 否则保持「失败即重试」的原有语义
 			if s.recordEpochFailure(i, err) {
 				if e := s.saveSkippedEpochIdentity(i, syncerEpochs[i.Int64()]); e != nil {
 					err = e
@@ -591,9 +647,7 @@ func (s *Syncer) sync(end chain.Epoch) (err error) {
 
 	s.epoch = end + 1
 	// 本批高度（含被跳过的）已经推进过去：清理失败计数与跳过状态，避免长跑时无限累积
-	if s.failures != nil {
-		s.failures.resetBelow(s.epoch)
-	}
+	s.resetFailuresBelow(s.epoch)
 
 	return
 }
@@ -703,9 +757,12 @@ func (s *Syncer) CheckConsistency(start, end chain.Epoch) (epoch chain.Epoch, er
 		}
 	}
 
-	// 因数据级错误被跳过的高度不会执行任务/计算器，因此没有任务记录：
-	// 它们已登记在跳过台账（chain.sync_skipped_epochs）中，属于「已知的数据坏点」而非遗漏，
+	// 因不可恢复错误被跳过的高度不会执行任务/计算器，因此没有任务记录：
+	// 它们已登记在跳过台账（chain.sync_skipped_epochs）中，属于「已知的坏点」而非遗漏，
 	// 不参与任务覆盖度检查，否则一致性检查会误判为任务缺失并触发回滚。
+	// 两类记录都要展开：单高度行（数据级/节点侧单高度跳过）与区间行（一次跳过整段，
+	// skipped_from..skipped_to —— 例如运维把 chain.sync_syncers.epoch 改回区间起点重跑时，
+	// 区间内的这些高度在重跑完成前仍被当作「已知跳过」，不会触发误判回滚）。
 	skips := map[int64]struct{}{}
 	if s.skipLedger != nil {
 		var skipped []*po.SyncSkippedEpoch
@@ -713,9 +770,7 @@ func (s *Syncer) CheckConsistency(start, end chain.Epoch) (epoch chain.Epoch, er
 		if err != nil {
 			return epoch, err
 		}
-		for _, v := range skipped {
-			skips[v.Epoch] = struct{}{}
-		}
+		skips = coveredEpochs(skipped, s.epoch, end)
 	}
 
 	tasksMap := map[string]map[int64]struct{}{}
@@ -818,11 +873,9 @@ func (s *Syncer) Rollback(from, to chain.Epoch) (err error) {
 
 	// 重置回滚高度
 	s.epoch = to
-	// 链回滚后，被回滚高度的「数据级坏点」判定不再成立（区块数据可能已被重组替换），
-	// 清空跳过计数与已跳过集合，让这些高度重新按「连续 N 次失败」判定
-	if s.failures != nil {
-		s.failures.reset()
-	}
+	// 链回滚后，被回滚高度的「坏点」判定不再成立（区块数据可能已被重组替换），
+	// 清空跳过计数与已跳过集合（两类错误计数器一起清），让这些高度重新按「连续 N 次失败」判定
+	s.resetFailures()
 	wait := 3 * time.Second
 	s.log.Infof("链回滚成功，数据从: %s 回滚至: %s 高度, 回滚区间：%d 等待: %s", from, s.epoch, from-s.epoch+1, wait)
 	time.Sleep(wait)

@@ -105,6 +105,18 @@ type Syncer struct {
 	// 连续失败多少次后，登记并跳过该高度继续往下同步；传输级错误（网络/超时）不受此配置影响，
 	// 始终按原有逻辑重试。未配置或 <=0 时取同步器内置默认值 5。
 	DataErrorThreshold *int64 `toml:"data_error_threshold"`
+	// UnrecoverableErrorThreshold 节点侧状态不可用（不可恢复）错误（日志形如 load state tree /
+	// failed to load hamt node / ipld: could not find —— 本地节点只保留近期状态窗口，历史状态已被裁掉）
+	// 连续失败多少次后登记并跳过；该计数与 DataErrorThreshold **独立**。
+	// 未配置或 <=0 时取同步器内置默认值 20（重试间隔默认 15s ⇒ 约 5 分钟）。
+	UnrecoverableErrorThreshold *int64 `toml:"unrecoverable_error_threshold"`
+	// StateGapJumpMinGap 触发「一次跳过整段不可恢复区间」的最小缺口（链头 − 当前高度）。
+	// 实测这类缺口是几万个连续高度，一个高度一个高度跳过没有意义；缺口 >= 该值时一次跳到
+	// 链头 − StateGapJumpMargin。未配置或 <=0 时取同步器内置默认值 1000。
+	StateGapJumpMinGap *int64 `toml:"state_gap_jump_min_gap"`
+	// StateGapJumpMargin 区间跳的目标高度 = 链头 − margin（留出安全边界，避免贴着链头被回滚）。
+	// 未配置或 <=0 时取同步器内置默认值 200。
+	StateGapJumpMargin *int64 `toml:"state_gap_jump_margin"`
 }
 
 // DataErrorThresholdValue 返回配置的「数据级错误跳过阈值」；未配置时返回 0（由同步器回退到内置默认值 5）。
@@ -114,6 +126,31 @@ func (s *Syncer) DataErrorThresholdValue() int64 {
 		return 0
 	}
 	return *s.DataErrorThreshold
+}
+
+// UnrecoverableErrorThresholdValue 返回配置的「节点侧不可恢复错误跳过阈值」；
+// 未配置时返回 0（由同步器回退到内置默认值 20）。同样避免老配置文件缺字段时 panic。
+func (s *Syncer) UnrecoverableErrorThresholdValue() int64 {
+	if s == nil || s.UnrecoverableErrorThreshold == nil {
+		return 0
+	}
+	return *s.UnrecoverableErrorThreshold
+}
+
+// StateGapJumpMinGapValue 返回配置的「区间跳最小缺口」；未配置时返回 0（由同步器回退到内置默认值 1000）。
+func (s *Syncer) StateGapJumpMinGapValue() int64 {
+	if s == nil || s.StateGapJumpMinGap == nil {
+		return 0
+	}
+	return *s.StateGapJumpMinGap
+}
+
+// StateGapJumpMarginValue 返回配置的「区间跳目标 margin」；未配置时返回 0（由同步器回退到内置默认值 200）。
+func (s *Syncer) StateGapJumpMarginValue() int64 {
+	if s == nil || s.StateGapJumpMargin == nil {
+		return 0
+	}
+	return *s.StateGapJumpMargin
 }
 
 type Mail struct {
