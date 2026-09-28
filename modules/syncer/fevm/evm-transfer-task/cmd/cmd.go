@@ -4,7 +4,7 @@
 // 派生数据补回来，而**完全不碰**同步指针与台账 —— 即 chain.sync_syncers、
 // chain.sync_task_epochs、chain.sync_syncer_epochs、chain.sync_skipped_epochs 一个都不写。
 //
-// 为什么必须走本命令，而不能靠「把 chain.sync_syncers.epoch 回拨到缺口起点重跑」：
+// 为什么要走本命令，而不能靠「把 chain.sync_syncers.epoch 回拨到缺口起点重跑」：
 // 所有 fevm 派生同步器都共用 injector.SetTracesBuilder，而非 Dry 模式下它会调用
 // ctx.Adapter().Epoch(&epoch) 去校验该高度的 tipset；对历史缺口高度该调用必然失败
 // （load state tree: failed to load hamt node —— 本地节点只保留近期状态窗口，历史状态已被裁掉），
@@ -15,18 +15,22 @@
 //   - --no-write：跑完整条 task 管线（含聚合器取数、actor 查询、聚合统计），
 //     但派生表的写入与删除全部被拦下，只统计「调用次数 / 行数 / 聚合器调用次数 / 耗时」。
 //     用于上线前安全测量压力与预计写入量，不产生任何数据变更。
+//
+// 幂等性提醒：fevm.evm_transfers 上有 message_cid 唯一索引，同一区间跑第二遍会撞唯一键
+// （写库路径报错、该高度重试后仍失败）。需要重跑时，先删除区间内的旧行
+// （`delete from fevm.evm_transfers where epoch between <start> and <end>`）再跑。
 package evmtransfercmd
 
 import (
-	"fmt"
 	"log"
-	"time"
 
 	"github.com/spf13/cobra"
-	"gitlab.forceup.in/fil-data-factory/filscan-backend/injector"
-	"gitlab.forceup.in/fil-data-factory/filscan-backend/modules/common/config"
-	"gitlab.forceup.in/fil-data-factory/filscan-backend/utils/_app"
-	"gitlab.forceup.in/fil-data-factory/filscan-backend/utils/_config"
+	"gitlab.forceup.in/fil-data-factory/filscan-backend/modules/common/infra/dal"
+	"gitlab.forceup.in/fil-data-factory/filscan-backend/modules/common/repository"
+	filscansyncer "gitlab.forceup.in/fil-data-factory/filscan-backend/modules/syncer"
+	evmtransfertask "gitlab.forceup.in/fil-data-factory/filscan-backend/modules/syncer/fevm/evm-transfer-task"
+	"gitlab.forceup.in/fil-data-factory/filscan-backend/modules/syncer/fevm/offline-replay"
+	"gorm.io/gorm"
 )
 
 type options struct {
@@ -59,81 +63,36 @@ func Command() *cobra.Command {
 			}()
 
 			// 区间解析与校验放在最前面：参数不合法就不去连任何生产依赖
-			rng, err := ResolveRange(option.start, option.end)
+			rng, err := offlinereplay.ResolveRange(option.start, option.end)
 			if err != nil {
 				return
 			}
 
-			conf := &config.Config{}
-			err = _config.UnmarshalConfigFile(option.config, conf)
+			deps, err := offlinereplay.Connect(option.config)
 			if err != nil {
 				return
 			}
-			log.Printf("离线回放高度区间: %s; %s", rng, confLine(conf))
+			defer deps.Close()
+			log.Printf("离线回放高度区间: %s; %s", rng, offlinereplay.ConfLine(deps.Conf))
 
-			db, cancel, err := injector.NewGormDB(conf)
-			if err != nil {
-				return
-			}
-			defer func() {
-				cancel()
-			}()
+			target, writes := buildTarget(deps.DB, option.noWrite)
+			chunk, threshold := deps.EpochsConfig()
 
-			agg, err := injector.NewLondobellAgg(conf)
-			if err != nil {
-				return
-			}
-
-			adapter, err := injector.NewLondobellAdapter(conf)
-			if err != nil {
-				return
-			}
-
-			var chunk, threshold int64
-			if conf.Syncer != nil {
-				chunk = derefInt64(conf.Syncer.EpochsChunk)
-				threshold = derefInt64(conf.Syncer.EpochsThreshold)
-			}
-
-			s, tel, err := BuildSyncer(RunOptions{
+			s, tel, err := offlinereplay.Assemble(offlinereplay.RunOptions{
 				From:            rng.From.Int64(),
 				To:              rng.To.Int64(),
 				NoWrite:         option.noWrite,
 				EpochsChunk:     chunk,
 				EpochsThreshold: threshold,
-			}, db, agg, adapter, nil)
+			}, target, deps.DB, deps.Agg, deps.Adapter)
 			if err != nil {
 				return
 			}
+			tel.Writes = writes
 
-			err = s.Init()
-			if err != nil {
-				return
-			}
-
-			if option.noWrite {
-				log.Printf("模式: --no-write（只统计不落库）—— 派生表写入全部被拦截，仅计数；" +
-					"仍会连接数据库读取（只读 SQL），不会产生任何数据变更")
-			} else {
-				log.Printf("模式: 真写 —— 本次会真实写入 fevm.evm_transfers / fevm.evm_transfer_stats" +
-					"（仍不会写同步指针与台账）；若只想测量请加 --no-write")
-			}
-
-			started := time.Now()
-			done := make(chan struct{})
-			go func() {
-				defer close(done)
-				s.Run()
-			}()
-
-			select {
-			case <-done:
-				log.Printf("离线回放结束: %s", rng)
-			case sig := <-_app.WaitExitSignal():
-				log.Printf("收到信号 %s，停止等待（以下统计为部分结果）", sig)
-			}
-
-			fmt.Println(tel.Report(rng, time.Since(started)))
+			err = offlinereplay.Execute(s, tel, offlinereplay.RunOptions{
+				From: rng.From.Int64(), To: rng.To.Int64(), NoWrite: option.noWrite,
+			})
 		},
 	}
 
@@ -150,24 +109,20 @@ func Command() *cobra.Command {
 	return cmd
 }
 
-// derefInt64 安全解引用可选的 int64 配置项（缺失/未配置时返回 0，由 BuildSyncer 回退默认值）
-func derefInt64(p *int64) (v int64) {
-	if p == nil {
-		return 0
+// buildTarget 装配回放目标：同步器名与生产一致（evm-contract），任务为 EVMTransferTask。
+// --no-write 时用「只统计不落库」包装包住仓储，并返回写统计来源。
+func buildTarget(db *gorm.DB, noWrite bool) (offlinereplay.Target, func() []offlinereplay.WriteStat) {
+	var repo repository.EvmTransferRepo = dal.NewEVMTransferDal(db)
+	if !noWrite {
+		return offlinereplay.Target{
+			Name:   filscansyncer.EvmContractSyncer,
+			Groups: []filscansyncer.TaskGroup{{evmtransfertask.NewEVMTransferTask(repo)}},
+		}, nil
 	}
-	return *p
-}
 
-// confLine 打印「连的是谁」，便于运维在跑之前核对指向（不打印 DSN，避免泄露口令）
-func confLine(conf *config.Config) string {
-	deref := func(p *string) string {
-		if p == nil || *p == "" {
-			return "<未配置>"
-		}
-		return *p
-	}
-	if conf == nil || conf.Londobell == nil {
-		return "聚合器=<未配置> 适配器=<未配置>"
-	}
-	return fmt.Sprintf("聚合器=%s 适配器=%s", deref(conf.Londobell.AggAddress), deref(conf.Londobell.AdapterAddress))
+	wrapped := NewNoWriteEvmTransferRepo(repo)
+	return offlinereplay.Target{
+		Name:   filscansyncer.EvmContractSyncer,
+		Groups: []filscansyncer.TaskGroup{{evmtransfertask.NewEVMTransferTask(wrapped)}},
+	}, wrapped.WriteStats
 }

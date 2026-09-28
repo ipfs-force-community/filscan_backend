@@ -1,4 +1,13 @@
-package evmtransfercmd
+// Package offlinereplay 是「离线回放指定高度区间的派生数据」工具链的公共框架。
+//
+// 三个子命令（evm-transfer / erc20 / fns）共用本包，各自只提供：
+//   - 同步器名与任务/计算器（Target）；
+//   - 「只统计不落库」的仓储包装（用本包的 Counters 记账）。
+//
+// 公共安全性全部落在 Assemble 里（见其注释）：固定 Dry 模式 ⇒ 只跑任务与计算器
+// （即派生表写入），不写 chain.sync_syncers 进度指针、不写 chain.sync_task_epochs /
+// chain.sync_syncer_epochs、不写 chain.sync_skipped_epochs 台账，也不做链一致性检查与回滚。
+package offlinereplay
 
 import (
 	"fmt"
@@ -6,10 +15,7 @@ import (
 	"time"
 
 	"gitlab.forceup.in/fil-data-factory/filscan-backend/injector"
-	"gitlab.forceup.in/fil-data-factory/filscan-backend/modules/common/infra/dal"
-	"gitlab.forceup.in/fil-data-factory/filscan-backend/modules/common/repository"
 	"gitlab.forceup.in/fil-data-factory/filscan-backend/modules/syncer"
-	evm_transfer_task "gitlab.forceup.in/fil-data-factory/filscan-backend/modules/syncer/fevm/evm-transfer-task"
 	"gitlab.forceup.in/fil-data-factory/filscan-backend/pkg/chain"
 	"gitlab.forceup.in/fil-data-factory/filscan-backend/pkg/londobell"
 	"gorm.io/gorm"
@@ -21,9 +27,6 @@ const (
 	defaultEpochsThreshold int64 = 20
 	defaultErrorWait             = 15 * time.Second
 )
-
-// replayTaskName 回放任务名：取自任务自身，避免报告文案与任务名漂移
-var replayTaskName = evm_transfer_task.EVMTransferTask{}.Name()
 
 // Range 离线回放的高度区间（左闭右闭，与 syncer 的 InitEpoch / StopEpoch 语义一致：
 // 高度 = StopEpoch 的那一批跑完即退出，不会多跑一个高度）
@@ -62,38 +65,59 @@ func ResolveRange(start, end int64) (Range, error) {
 type RunOptions struct {
 	From int64 // 起始高度（含）
 	To   int64 // 截止高度（含）
-	// NoWrite 只统计不落库：跑完整条 task 管线，但派生表写入（含删除）全部拦下只计数
+	// NoWrite 只统计不落库：跑完整条 task/计算器管线，但派生表写入（含删除）全部拦下只计数
 	NoWrite         bool
 	EpochsChunk     int64         // 并发同步高度数（<=0 取默认 3）
 	EpochsThreshold int64         // 单批区间上限（<=0 取默认 20）
 	ErrorWait       time.Duration // 单批失败后的重试等待（<=0 取默认 15s）
 }
 
-// Telemetry 离线回放的统计口径（聚合器调用次数 + 被拦下的派生表写入）
+// Target 回放目标：同步器名 + 任务分组 + 计算器。
+// 各命令包按自身依赖构造（NoWrite 时把「只统计不落库」的仓储包装注进去）。
+type Target struct {
+	Name        string              // 与生产同步器同名的同步器名（如 evm-contract/erc20/fns）
+	Groups      []syncer.TaskGroup  // 任务分组（组间并发、组内串行，与生产一致）
+	Calculators []syncer.Calculator // 计算器（按高度顺序串行执行）
+}
+
+// TaskNames 本目标涉及的任务/计算器名（报告与日志用）
+func (t Target) TaskNames() []string {
+	var names []string
+	for _, g := range t.Groups {
+		for _, task := range g {
+			names = append(names, task.Name())
+		}
+	}
+	for _, c := range t.Calculators {
+		names = append(names, c.Name())
+	}
+	return names
+}
+
+// Telemetry 离线回放的统计口径：聚合器调用次数 + 被拦下的派生表写入。
 type Telemetry struct {
 	From    int64
 	To      int64
 	NoWrite bool
+	Syncer  string
+	Tasks   []string
 	Agg     *CountingAgg
-	// Repo 只有 --no-write 模式非 nil；真写模式下写入直接下发数据库，不计数
-	Repo *NoWriteEvmTransferRepo
+	// Writes 写统计来源：由命令包返回各派生表的快照；真写模式返回 nil（写入直接下发，不计数）
+	Writes func() []WriteStat
 }
 
-// BuildSyncer 组装离线回放同步器。
+// Assemble 组装离线回放同步器。
 //
 // 关键约定（离线回放的全部安全性都落在这一处）：
-//   - WithDry(true)：Dry 模式下同步器只执行任务（= 派生表写入），**不写**
+//   - WithDry(true)：Dry 模式下同步器只执行任务与计算器（= 派生表写入），**不写**
 //     chain.sync_syncers（进度指针）/ chain.sync_task_epochs / chain.sync_syncer_epochs，
 //     也不做链一致性检查与回滚；跳过台账 chain.sync_skipped_epochs 同样不会被写
-//     （Dry 下 recordEpochFailure 直接返回，计数器永远不会达阈值，区间跳判定不成立）；
+//     （Dry 下 recordEpochFailure 直接返回，失败计数永远不达阈值，区间跳判定不成立）；
 //   - WithInitEpoch / WithStopEpoch：只跑 [From, To] 这一段；
-//   - SetTracesBuilder：本任务依赖 Datamap 里的 traces（与生产 evm-contract 同步器一致）；
-//   - NoWrite：派生表仓储被 NoWriteEvmTransferRepo 包住，写入只计数不落库。
-//
-// inner 是派生表仓储的写入目标；传 nil 表示使用 dal.NewEVMTransferDal(db)（生产路径，
-// 也是命令使用的路径）；单测传入假仓储以便断言「零写入」。
-func BuildSyncer(opt RunOptions, db *gorm.DB, agg londobell.Agg, adapter londobell.Adapter,
-	inner repository.EvmTransferRepo) (*syncer.Syncer, *Telemetry, error) {
+//   - SetTracesBuilder：派生任务都依赖 Datamap 里的 traces（与生产同步器一致）；
+//   - 聚合器被 CountingAgg 包住：无论是否 --no-write，都会统计各方法的调用次数。
+func Assemble(opt RunOptions, target Target, db *gorm.DB, agg londobell.Agg,
+	adapter londobell.Adapter) (*syncer.Syncer, *Telemetry, error) {
 
 	rng, err := ResolveRange(opt.From, opt.To)
 	if err != nil {
@@ -106,7 +130,13 @@ func BuildSyncer(opt RunOptions, db *gorm.DB, agg londobell.Agg, adapter londobe
 		return nil, nil, fmt.Errorf("离线回放需要聚合器客户端（traces/tipset 来源）")
 	}
 	if adapter == nil {
-		return nil, nil, fmt.Errorf("离线回放需要适配器客户端（actor 状态来源）")
+		return nil, nil, fmt.Errorf("离线回放需要适配器客户端（actor/epoch 来源）")
+	}
+	if target.Name == "" {
+		return nil, nil, fmt.Errorf("离线回放需要同步器名（与生产同名，便于对照任务表语义）")
+	}
+	if len(target.Groups) == 0 && len(target.Calculators) == 0 {
+		return nil, nil, fmt.Errorf("离线回放同步器 %s 的任务与计算器都为空", target.Name)
 	}
 
 	chunk, threshold, wait := opt.EpochsChunk, opt.EpochsThreshold, opt.ErrorWait
@@ -121,22 +151,18 @@ func BuildSyncer(opt RunOptions, db *gorm.DB, agg londobell.Agg, adapter londobe
 	}
 
 	cagg := NewCountingAgg(agg)
-	tel := &Telemetry{From: rng.From.Int64(), To: rng.To.Int64(), NoWrite: opt.NoWrite, Agg: cagg}
-
-	if inner == nil {
-		inner = dal.NewEVMTransferDal(db)
-	}
-	var repo repository.EvmTransferRepo = inner
-	if opt.NoWrite {
-		nw := NewNoWriteEvmTransferRepo(inner)
-		tel.Repo = nw
-		repo = nw
+	tel := &Telemetry{
+		From:    rng.From.Int64(),
+		To:      rng.To.Int64(),
+		NoWrite: opt.NoWrite,
+		Syncer:  target.Name,
+		Tasks:   target.TaskNames(),
+		Agg:     cagg,
 	}
 
 	from, to := rng.From.Int64(), rng.To.Int64()
 	s := syncer.NewSyncer(
-		// 与生产 evm-contract 同步器同名：任务名与表语义都按生产口径，Dry 保证不碰指针/台账
-		syncer.WithName(syncer.EvmContractSyncer),
+		syncer.WithName(target.Name),
 		syncer.WithDB(db),
 		syncer.WithLondobellAgg(cagg),
 		syncer.WithLondobellAdapter(adapter),
@@ -146,11 +172,8 @@ func BuildSyncer(opt RunOptions, db *gorm.DB, agg londobell.Agg, adapter londobe
 		syncer.WithEpochsThreshold(threshold),
 		syncer.WithErrorWaitDuration(wait),
 		syncer.WithDry(true),
-		syncer.WithTaskGroup(
-			[]syncer.Task{
-				evm_transfer_task.NewEVMTransferTask(repo),
-			},
-		),
+		syncer.WithTaskGroup(target.Groups...),
+		syncer.WithCalculators(target.Calculators...),
 		syncer.WithContextBuilder(injector.SetTracesBuilder),
 	)
 	return s, tel, nil
@@ -161,9 +184,11 @@ type reportInput struct {
 	From    int64
 	To      int64
 	NoWrite bool
+	Syncer  string
+	Tasks   []string
 	Elapsed time.Duration
 	Agg     AggStats
-	Writes  NoWriteStats
+	Writes  []WriteStat
 }
 
 // Report 生成离线回放统计报告
@@ -172,35 +197,38 @@ func (t *Telemetry) Report(rng Range, elapsed time.Duration) string {
 		From:    rng.From.Int64(),
 		To:      rng.To.Int64(),
 		NoWrite: t.NoWrite,
+		Syncer:  t.Syncer,
+		Tasks:   t.Tasks,
 		Elapsed: elapsed,
 	}
 	if t.Agg != nil {
 		in.Agg = t.Agg.Stats()
 	}
-	if t.Repo != nil {
-		in.Writes = t.Repo.Stats()
+	if t.Writes != nil {
+		in.Writes = t.Writes()
 	}
 	return formatReport(in)
 }
 
 func formatReport(in reportInput) string {
 	var b strings.Builder
-	b.WriteString("=== 离线回放统计报告（evm-transfer）===\n")
-	fmt.Fprintf(&b, "同步器/任务     : %s / %s\n", syncer.EvmContractSyncer, replayTaskName)
+	b.WriteString("=== 离线回放统计报告 ===\n")
+	fmt.Fprintf(&b, "同步器/任务     : %s / %s\n", in.Syncer, strings.Join(in.Tasks, "+"))
 	fmt.Fprintf(&b, "高度区间       : [%d, %d] 左闭右闭，共 %d 个高度\n", in.From, in.To, in.To-in.From+1)
 	fmt.Fprintf(&b, "耗时           : %s\n", in.Elapsed.Round(time.Millisecond))
 	fmt.Fprintf(&b, "聚合器调用     : Traces=%d Tipset=%d ParentTipset=%d LatestTipset=%d 合计=%d\n",
 		in.Agg.Traces, in.Agg.Tipsets, in.Agg.ParentTipsets, in.Agg.LatestTipsets, in.Agg.Total())
 	if in.NoWrite {
 		b.WriteString("模式           : --no-write 只统计不落库（派生表写入被拦截；不写同步指针/台账/任务高度）\n")
-		fmt.Fprintf(&b, "被拦下的写入   : fevm.evm_transfers %d 次/%d 行；"+
-			"fevm.evm_transfer_stats %d 次/%d 行；删除 %d 次；合计 %d 行\n",
-			in.Writes.TransferCalls, in.Writes.TransferRows,
-			in.Writes.StatCalls, in.Writes.StatRows, in.Writes.DeleteCalls, in.Writes.TotalRows())
-		fmt.Fprintf(&b, "预计写入行数   : 真写模式下即为 %d 行（本次未落库）\n", in.Writes.TotalRows())
+		calls, rows, deletes := SumWrites(in.Writes)
+		for _, w := range in.Writes {
+			fmt.Fprintf(&b, "被拦下的写入   : %s 写 %d 次/%d 行；删除 %d 次\n",
+				w.Table, w.Calls, w.Rows, w.Deletes)
+		}
+		fmt.Fprintf(&b, "被拦下的合计   : 写 %d 次/%d 行；删除 %d 次\n", calls, rows, deletes)
+		fmt.Fprintf(&b, "预计写入行数   : 真写模式下即为 %d 行（本次未落库）\n", rows)
 	} else {
-		b.WriteString("模式           : 真写（直接写 fevm.evm_transfers / fevm.evm_transfer_stats；" +
-			"仍不写同步指针/台账/任务高度）\n")
+		b.WriteString("模式           : 真写（直接写派生表；仍不写同步指针/台账/任务高度）\n")
 		b.WriteString("派生表写入     : 已直接下发数据库，未计数\n")
 	}
 	return b.String()

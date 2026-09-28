@@ -17,7 +17,9 @@ import (
 	procmd "gitlab.forceup.in/fil-data-factory/filscan-backend/modules/pro/cmd"
 	"gitlab.forceup.in/fil-data-factory/filscan-backend/modules/syncer"
 	syncer_api "gitlab.forceup.in/fil-data-factory/filscan-backend/modules/syncer/api"
+	erc20cmd "gitlab.forceup.in/fil-data-factory/filscan-backend/modules/syncer/fevm/erc20/cmd"
 	evmtransfercmd "gitlab.forceup.in/fil-data-factory/filscan-backend/modules/syncer/fevm/evm-transfer-task/cmd"
+	fnscmd "gitlab.forceup.in/fil-data-factory/filscan-backend/modules/syncer/fevm/fns-task/cmd"
 	nftcmd "gitlab.forceup.in/fil-data-factory/filscan-backend/modules/syncer/fevm/nft/cmd"
 	minertaskcmd "gitlab.forceup.in/fil-data-factory/filscan-backend/modules/syncer/miner/miner-task/cmd"
 	"gitlab.forceup.in/fil-data-factory/filscan-backend/pkg/chain"
@@ -62,6 +64,10 @@ func init() {
 	rootCmd.AddCommand(nftcmd.Command())
 	// 离线回放指定高度区间的 EVM 转账派生数据（Dry 模式：只写派生表，不写指针/台账）
 	rootCmd.AddCommand(evmtransfercmd.Command())
+	// 离线回放指定高度区间的 ERC20 派生数据（同上，另需 ABI 解码器与 lotus 节点）
+	rootCmd.AddCommand(erc20cmd.Command())
+	// 离线回放指定高度区间的 FNS 派生数据（task + calculator，可 --skip-calculator）
+	rootCmd.AddCommand(fnscmd.Command())
 	rootCmd.AddCommand(procmd.ProInfoCommand())
 	rootCmd.AddCommand(procmd.ProRewardCommand())
 	rootCmd.AddCommand(procmd.ProSectorCommand())
