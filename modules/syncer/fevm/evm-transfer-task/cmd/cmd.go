@@ -16,9 +16,22 @@
 //     但派生表的写入与删除全部被拦下，只统计「调用次数 / 行数 / 聚合器调用次数 / 耗时」。
 //     用于上线前安全测量压力与预计写入量，不产生任何数据变更。
 //
-// 幂等性提醒：fevm.evm_transfers 上有 message_cid 唯一索引，同一区间跑第二遍会撞唯一键
-// （写库路径报错、该高度重试后仍失败）。需要重跑时，先删除区间内的旧行
+// 加速开关 --skip-acc-stats（默认关闭 ⇒ 行为与不带该参数时完全一致）：
+// 跳过每 120 高度的「1 小时累计快照」重算。该重算的 SQL 要扫 fevm.evm_transfers 全表
+// （线上约 1049 万行）叠窗口函数排序，排序溢出 403MB 临时文件、实测单次 35 秒，是回放期间
+// 最主要的纯耗时来源；而回放区间内这些「缺口边界」快照一行都不会被接口读到（接口只读 max(epoch)
+// 的链头快照，由实时同步器维护），故离线回放可安全跳过。实时同步器不带该参数，行为不变。
+//
+// 幂等性提醒（重跑前必读）：fevm.evm_transfers 上有 message_cid 唯一索引
+// （见 migration/12.evm_contract.sql），而本命令写的这张表仍是裸插入 —— 仓储侧
+// （modules/common/infra/dal/dal_evm_transfer.go 的 SaveEvmTransfers）**没有**「先查后跳」守卫，
+// 所以同一区间跑第二遍仍会撞唯一键（写库路径报错、该高度重试后仍失败）。
+// 需要重跑时，先删除区间内的旧行
 // （`delete from fevm.evm_transfers where epoch between <start> and <end>`）再跑。
+// 别把这条与同目录的 erc20 / nft 回放混为一谈：那两条路径的派生表
+// （fevm.erc_20_transfers / fevm.nft_transfers）已在应用层加了「先查后跳」守卫
+// （dal 的 FilterExistingERC20Transfers、nft Mapper 的 cid 去重），重跑会自动跳过已写入的行，
+// 不需要先删；本命令的 evm_transfers 目前还没有这层守卫。
 package evmtransfercmd
 
 import (
@@ -34,11 +47,12 @@ import (
 )
 
 type options struct {
-	config     string
-	start      int64
-	end        int64
-	epochsFile string
-	noWrite    bool
+	config       string
+	start        int64
+	end          int64
+	epochsFile   string
+	noWrite      bool
+	skipAccStats bool
 }
 
 // Command 离线回放 EVM 转账派生数据（指定高度区间或高度清单，只写派生表）
@@ -46,7 +60,7 @@ func Command() *cobra.Command {
 	option := options{}
 	cmd := &cobra.Command{
 		Use: "evm-transfer [-c|--config /path/to/config.toml] (--start <高度> --end <高度> | " +
-			"--epochs-file <清单文件>) [--no-write]",
+			"--epochs-file <清单文件>) [--no-write] [--skip-acc-stats]",
 		Short: "离线回放指定高度区间/高度清单的 EVM 转账派生数据（不写同步指针/台账）",
 		Long: "离线回放高度区间 [--start, --end]（左闭右闭）或高度清单 [--epochs-file]（一行一个高度，\n" +
 			"升序逐个高度）的 fevm EVM 转账派生数据，补 fevm.evm_transfers / fevm.evm_transfer_stats。\n" +
@@ -56,7 +70,11 @@ func Command() *cobra.Command {
 			"不写 chain.sync_task_epochs / chain.sync_syncer_epochs、不写 chain.sync_skipped_epochs 跳过台账，\n" +
 			"也不做链一致性检查与回滚。\n\n" +
 			"--no-write：跑完整条管线但不写任何派生表，只输出统计（处理高度数 / 聚合器调用次数 / 耗时 /\n" +
-			"预计写入行数），用于安全测量；该模式下不会产生任何数据变更。",
+			"预计写入行数），用于安全测量；该模式下不会产生任何数据变更。\n\n" +
+			"--skip-acc-stats：跳过每 120 高度的 1 小时累计快照重算（离线回放专用）。该重算要扫\n" +
+			"fevm.evm_transfers 全表叠窗口函数排序（线上实测单次约 35 秒），而回放区间内这些缺口边界\n" +
+			"快照不被接口读取（接口只读 max(epoch) 的链头快照，由实时同步器维护），故离线回放可安全跳过。\n" +
+			"默认关闭 ⇒ 不带该参数时行为与不带开关的历史版本完全一致。",
 		Run: func(cmd *cobra.Command, args []string) {
 
 			var err error
@@ -79,7 +97,7 @@ func Command() *cobra.Command {
 			defer deps.Close()
 			log.Printf("离线回放计划: %s; %s", plan, offlinereplay.ConfLine(deps.Conf))
 
-			target, writes := buildTarget(deps.DB, option.noWrite)
+			target, writes := buildTarget(deps.DB, option.noWrite, option.skipAccStats)
 
 			opt := offlinereplay.RunOptions{NoWrite: option.noWrite}
 			opt.EpochsChunk, opt.EpochsThreshold = deps.EpochsConfig()
@@ -95,6 +113,8 @@ func Command() *cobra.Command {
 		"高度清单文件（一行一个高度，可含空行与 # 注释；与 --start/--end 互斥；内部升序去重后逐个高度回放）")
 	cmd.Flags().BoolVar(&option.noWrite, "no-write", false,
 		"只统计不落库：跑完整条 task 管线但不写任何派生表，只输出统计")
+	cmd.Flags().BoolVar(&option.skipAccStats, "skip-acc-stats", false,
+		"跳过每 120 高度的 1 小时累计快照重算（离线回放专用；缺口边界快照不被接口读取）")
 	cmd.Flags().SortFlags = false
 	_ = cmd.MarkFlagRequired("config")
 
@@ -103,18 +123,19 @@ func Command() *cobra.Command {
 
 // buildTarget 装配回放目标：同步器名与生产一致（evm-contract），任务为 EVMTransferTask。
 // --no-write 时用「只统计不落库」包装包住仓储，并返回写统计来源。
-func buildTarget(db *gorm.DB, noWrite bool) (offlinereplay.Target, func() []offlinereplay.WriteStat) {
+// skipAccStats 透传给任务（离线回放专用开关，默认 false ⇒ 行为与历史版本一致）。
+func buildTarget(db *gorm.DB, noWrite, skipAccStats bool) (offlinereplay.Target, func() []offlinereplay.WriteStat) {
 	var repo repository.EvmTransferRepo = dal.NewEVMTransferDal(db)
 	if !noWrite {
 		return offlinereplay.Target{
 			Name:   filscansyncer.EvmContractSyncer,
-			Groups: []filscansyncer.TaskGroup{{evmtransfertask.NewEVMTransferTask(repo)}},
+			Groups: []filscansyncer.TaskGroup{{evmtransfertask.NewEVMTransferTask(repo).WithSkipAccStats(skipAccStats)}},
 		}, nil
 	}
 
 	wrapped := NewNoWriteEvmTransferRepo(repo)
 	return offlinereplay.Target{
 		Name:   filscansyncer.EvmContractSyncer,
-		Groups: []filscansyncer.TaskGroup{{evmtransfertask.NewEVMTransferTask(wrapped)}},
+		Groups: []filscansyncer.TaskGroup{{evmtransfertask.NewEVMTransferTask(wrapped).WithSkipAccStats(skipAccStats)}},
 	}, wrapped.WriteStats
 }
