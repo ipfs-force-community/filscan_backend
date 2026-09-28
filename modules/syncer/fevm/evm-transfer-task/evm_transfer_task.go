@@ -43,6 +43,25 @@ func (e EVMTransferTask) Name() string {
 	return "evm-transfer-task"
 }
 
+// isEvmTransferTrace 判定该 trace 是否要作为一条 EVM 转账处理。
+//
+// 判据顺序是关键：**先判 trace / trace.Detail 是否为 nil，再取 Detail 的字段**。
+// 原实现在 nil 判断之前就执行 strings.Split(trace.Detail.Actor, "/") ⇒ 只要聚合器返回的
+// trace 文档里缺 Detail（或 traces 里夹了空元素），execTaskOrCalculator 的 recover 就会把
+// 该高度变成「recover error: runtime error: invalid memory address or nil pointer dereference」
+// 而整高度失败并原地重试 —— 一处缺失字段即可再次造成静默停摆。
+// 判定语义与原实现完全一致：调用方为 evm 且方法为 InvokeContract 的区块消息才算。
+func isEvmTransferTrace(trace *londobell.TraceMessage) bool {
+	if trace == nil || trace.Detail == nil {
+		return false
+	}
+	if !trace.IsBlock || trace.Detail.Method != "InvokeContract" {
+		return false
+	}
+	actorTypeSplit := strings.Split(trace.Detail.Actor, "/")
+	return len(actorTypeSplit) != 0 && actorTypeSplit[len(actorTypeSplit)-1] == "evm"
+}
+
 func (e EVMTransferTask) Exec(ctx *syncer.Context) (err error) {
 
 	ctx.Debugf("开始同步...")
@@ -65,42 +84,43 @@ func (e EVMTransferTask) Exec(ctx *syncer.Context) (err error) {
 	var evmTransferStats1h []*po.EvmTransferStat
 
 	for _, trace := range traces {
-		actorTypeSplit := strings.Split(trace.Detail.Actor, "/")
-		if trace.Detail != nil && actorTypeSplit[len(actorTypeSplit)-1] == "evm" && trace.Detail.Method == "InvokeContract" && trace.IsBlock == true {
-			var actor *londobell.ActorState
-			actor, err = ctx.Adapter().Actor(ctx.Context(), trace.To, nil)
-			if err != nil {
-				return
-			}
-
-			var gasCost decimal.Decimal
-			if trace.GasCost != nil {
-				gasCost = trace.GasCost.TotalCost
-			}
-			var exitCode *int
-			if trace.MsgRct != nil {
-				exitCode = &trace.MsgRct.ExitCode
-			}
-			var cid string
-			if trace.SignedCid != nil && *trace.SignedCid != "" {
-				cid = *trace.SignedCid
-			} else {
-				cid = trace.Cid
-			}
-
-			evmTransfers = append(evmTransfers, &po.EvmTransfer{
-				Epoch:        trace.Epoch,
-				MessageCid:   cid,
-				ActorID:      actor.ActorID,
-				ActorAddress: actor.DelegatedAddr,
-				UserAddress:  trace.From.Address(),
-				Balance:      actor.Balance,
-				GasCost:      gasCost,
-				Value:        trace.Value,
-				ExitCode:     exitCode,
-				MethodName:   trace.Detail.Method,
-			})
+		if !isEvmTransferTrace(trace) {
+			continue
 		}
+
+		var actor *londobell.ActorState
+		actor, err = ctx.Adapter().Actor(ctx.Context(), trace.To, nil)
+		if err != nil {
+			return
+		}
+
+		var gasCost decimal.Decimal
+		if trace.GasCost != nil {
+			gasCost = trace.GasCost.TotalCost
+		}
+		var exitCode *int
+		if trace.MsgRct != nil {
+			exitCode = &trace.MsgRct.ExitCode
+		}
+		var cid string
+		if trace.SignedCid != nil && *trace.SignedCid != "" {
+			cid = *trace.SignedCid
+		} else {
+			cid = trace.Cid
+		}
+
+		evmTransfers = append(evmTransfers, &po.EvmTransfer{
+			Epoch:        trace.Epoch,
+			MessageCid:   cid,
+			ActorID:      actor.ActorID,
+			ActorAddress: actor.DelegatedAddr,
+			UserAddress:  trace.From.Address(),
+			Balance:      actor.Balance,
+			GasCost:      gasCost,
+			Value:        trace.Value,
+			ExitCode:     exitCode,
+			MethodName:   trace.Detail.Method,
+		})
 	}
 
 	if len(traces) != 0 && traces[0].Epoch%120 == 0 {
