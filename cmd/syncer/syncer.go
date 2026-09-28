@@ -17,6 +17,7 @@ import (
 	procmd "gitlab.forceup.in/fil-data-factory/filscan-backend/modules/pro/cmd"
 	"gitlab.forceup.in/fil-data-factory/filscan-backend/modules/syncer"
 	syncer_api "gitlab.forceup.in/fil-data-factory/filscan-backend/modules/syncer/api"
+	evmtransfercmd "gitlab.forceup.in/fil-data-factory/filscan-backend/modules/syncer/fevm/evm-transfer-task/cmd"
 	nftcmd "gitlab.forceup.in/fil-data-factory/filscan-backend/modules/syncer/fevm/nft/cmd"
 	minertaskcmd "gitlab.forceup.in/fil-data-factory/filscan-backend/modules/syncer/miner/miner-task/cmd"
 	"gitlab.forceup.in/fil-data-factory/filscan-backend/pkg/chain"
@@ -59,6 +60,8 @@ func init() {
 
 	//rootCmd.AddCommand(evm_transfer_history_task.EvmContractCmd)
 	rootCmd.AddCommand(nftcmd.Command())
+	// 离线回放指定高度区间的 EVM 转账派生数据（Dry 模式：只写派生表，不写指针/台账）
+	rootCmd.AddCommand(evmtransfercmd.Command())
 	rootCmd.AddCommand(procmd.ProInfoCommand())
 	rootCmd.AddCommand(procmd.ProRewardCommand())
 	rootCmd.AddCommand(procmd.ProSectorCommand())
