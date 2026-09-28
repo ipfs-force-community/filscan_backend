@@ -417,7 +417,11 @@ func (e ERC20Dal) CreateERC20TransferBatch(ctx context.Context, items []*po.FEvm
 	if err != nil {
 		return
 	}
-	err = db.CreateInBatches(items, 100).Error
+	// PG 侧 fevm.erc_20_transfers 已有 UNIQUE (cid, "index")。原来这里是裸插入：分片重叠回放 /
+	// 同步重试时同一行会被重复写入（实测一次重跑产生 14,122 行重复），而且加了唯一键之后
+	// 重叠写入会直接撞唯一键硬报错 ⇒ 该高度任务失败并被框架无限重试、卡死。
+	// 冲突即忽略（DO NOTHING），让重跑天然幂等，同时不改变首次写入的行为。
+	err = db.Clauses(clause.OnConflict{DoNothing: true}).CreateInBatches(items, 100).Error
 	return
 }
 
@@ -426,7 +430,9 @@ func (e ERC20Dal) CreateERC20SwapInfoBatch(ctx context.Context, items []*po.FEvm
 	if err != nil {
 		return
 	}
-	err = db.CreateInBatches(items, 100).Error
+	// 该表当前没有唯一键，DO NOTHING 不会命中任何冲突、无副作用；属未来防护：
+	// 一旦补上唯一键，重叠重跑同样幂等而不是硬报错卡死该高度。
+	err = db.Clauses(clause.OnConflict{DoNothing: true}).CreateInBatches(items, 100).Error
 	return
 }
 
