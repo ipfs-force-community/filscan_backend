@@ -2,6 +2,7 @@ package evmtransfercmd
 
 import (
 	"context"
+	"sync"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -18,38 +19,71 @@ type fakeEvmTransferRepo struct {
 	// 嵌入接口：本用例只关心写方法，其余（如 CountTxsOfContracts）不实现，被调用即 panic
 	repository.EvmTransferRepo
 
+	// 同步器按高度并发跑任务（EpochsChunk），假仓储必须自带互斥
+	mu     sync.Mutex
 	writes int
 	reads  int
 	calls  []string
 }
 
+// Writes 已发生的底层写入次数
+func (f *fakeEvmTransferRepo) Writes() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.writes
+}
+
+// Reads 已发生的底层读取次数
+func (f *fakeEvmTransferRepo) Reads() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.reads
+}
+
+// Calls 调用序列快照
+func (f *fakeEvmTransferRepo) Calls() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.calls...)
+}
+
 func (f *fakeEvmTransferRepo) SaveEvmTransfers(_ context.Context, _ []*po.EvmTransfer) error {
+	f.mu.Lock()
 	f.writes++
 	f.calls = append(f.calls, "SaveEvmTransfers")
+	f.mu.Unlock()
 	return nil
 }
 
 func (f *fakeEvmTransferRepo) SaveEvmTransferStats(_ context.Context, _ []*po.EvmTransferStat) error {
+	f.mu.Lock()
 	f.writes++
 	f.calls = append(f.calls, "SaveEvmTransferStats")
+	f.mu.Unlock()
 	return nil
 }
 
 func (f *fakeEvmTransferRepo) DeleteEvmTransfers(_ context.Context, _ chain.Epoch) error {
+	f.mu.Lock()
 	f.writes++
 	f.calls = append(f.calls, "DeleteEvmTransfers")
+	f.mu.Unlock()
 	return nil
 }
 
 func (f *fakeEvmTransferRepo) DeleteEvmTransferStats(_ context.Context, _ chain.Epoch) error {
+	f.mu.Lock()
 	f.writes++
 	f.calls = append(f.calls, "DeleteEvmTransferStats")
+	f.mu.Unlock()
 	return nil
 }
 
 func (f *fakeEvmTransferRepo) GetEvmTransferStats(_ context.Context, _ chain.Epoch) ([]*bo.EVMTransferStats, error) {
+	f.mu.Lock()
 	f.reads++
 	f.calls = append(f.calls, "GetEvmTransferStats")
+	f.mu.Unlock()
 	return nil, nil
 }
 
@@ -63,8 +97,8 @@ func TestNoWriteEvmTransferRepoBlocksAllWrites(t *testing.T) {
 	require.NoError(t, wrapped.DeleteEvmTransfers(ctx, chain.Epoch(100)))
 	require.NoError(t, wrapped.DeleteEvmTransferStats(ctx, chain.Epoch(100)))
 
-	require.Zero(t, inner.writes, "底层仓储一次写都不该被调用")
-	require.Empty(t, inner.calls)
+	require.Zero(t, inner.Writes(), "底层仓储一次写都不该被调用")
+	require.Empty(t, inner.Calls())
 
 	// 计数如实记录「本来会写多少行」
 	calls, rows, deletes := wrapped.TransferStats()
@@ -91,7 +125,7 @@ func TestNoWriteEvmTransferRepoPassesReadsThrough(t *testing.T) {
 	got, err := wrapped.GetEvmTransferStats(context.Background(), chain.Epoch(6357058))
 	require.NoError(t, err)
 	require.Nil(t, got)
-	require.Equal(t, 1, inner.reads, "读操作必须透传到底层（离线回放要读派生表算累计快照）")
+	require.Equal(t, 1, inner.Reads(), "读操作必须透传到底层（离线回放要读派生表算累计快照）")
 	require.Equal(t, inner, wrapped.Inner())
 
 	require.Panics(t, func() { NewNoWriteEvmTransferRepo(nil) })

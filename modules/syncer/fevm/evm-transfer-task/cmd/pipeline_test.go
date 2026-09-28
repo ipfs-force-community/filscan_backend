@@ -96,7 +96,7 @@ func TestReplayNoWriteCountsWithoutAnyWrite(t *testing.T) {
 	s, tel, inner, wrapped := buildReplay(t, rec, adapter, true)
 	offlinereplay.RunSyncerAndWait(t, s.Run, 60*time.Second)
 
-	require.Zero(t, inner.writes, "真写通道一次都不该被碰")
+	require.Zero(t, inner.Writes(), "真写通道一次都不该被碰")
 	require.Equal(t, 10, adapterCallCount(adapter))
 
 	calls, rows, deletes := wrapped.TransferStats()
@@ -130,7 +130,7 @@ func TestDryModeSkipsPointerAndLedgerWritesEvenInWriteMode(t *testing.T) {
 	s, _, inner, _ := buildReplay(t, rec, adapter, false)
 	offlinereplay.RunSyncerAndWait(t, s.Run, 60*time.Second)
 
-	require.Equal(t, 5, inner.writes, "真写模式下派生表写入走真实仓储通道")
+	require.Equal(t, 5, inner.Writes(), "真写模式下派生表写入走真实仓储通道")
 	require.Empty(t, rec.Statements(),
 		"Dry 模式不写 chain.sync_syncers / chain.sync_task_epochs / chain.sync_syncer_epochs（一条 SQL 都不该有）")
 }
@@ -146,7 +146,7 @@ func TestReplayRetriesOnTaskErrorWithoutWritingPointerOrLedger(t *testing.T) {
 	s, _, inner, wrapped := buildReplay(t, rec, adapter, true)
 	offlinereplay.RunSyncerAndWait(t, s.Run, 60*time.Second)
 
-	require.Zero(t, inner.writes)
+	require.Zero(t, inner.Writes())
 	_, rows, _ := wrapped.TransferStats()
 	// 基线 10 行（5 个高度 × 2 条 trace）。这里刻意断言 12：批次内某个高度失败后整批重跑，
 	// Dry 模式**不做**「该高度任务是否已执行」的跳过判断（syncer 里该判断被 !s.dry 守着），
