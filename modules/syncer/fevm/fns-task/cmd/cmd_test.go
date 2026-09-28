@@ -113,11 +113,17 @@ func TestCommandRegistrationAndFlags(t *testing.T) {
 	cmd := Command()
 	require.Equal(t, "fns", cmd.Name())
 
-	for _, name := range []string{"config", "start", "end"} {
+	// --config 必填；--start/--end（区间）与 --epochs-file（清单）二选一 ⇒ 均不单独必填，
+	// 互斥由 offline-replay.ResolvePlan 判定（见该包单测）。
+	cfg := cmd.Flags().Lookup("config")
+	require.NotNil(t, cfg, "缺少参数 config")
+	require.Equal(t, []string{"true"}, cfg.Annotations[cobra.BashCompOneRequiredFlag],
+		"参数 config 必须标记为必填")
+	for _, name := range []string{"start", "end", "epochs-file"} {
 		flag := cmd.Flags().Lookup(name)
 		require.NotNil(t, flag, "缺少参数 %s", name)
-		require.Equal(t, []string{"true"}, flag.Annotations[cobra.BashCompOneRequiredFlag],
-			"参数 %s 必须标记为必填", name)
+		require.Empty(t, flag.Annotations[cobra.BashCompOneRequiredFlag],
+			"参数 %s 不应是必填：区间与清单模式二选一", name)
 	}
 
 	for _, name := range []string{"no-write", "skip-calculator"} {
@@ -128,7 +134,7 @@ func TestCommandRegistrationAndFlags(t *testing.T) {
 	}
 
 	for _, want := range []string{"fns.events", "fns.tokens", "fns.actions", "fns.transfers", "fns.reverses",
-		"chain.sync_syncers", "chain.sync_task_epochs", "chain.sync_skipped_epochs", "--no-write", "--skip-calculator"} {
+		"chain.sync_syncers", "chain.sync_task_epochs", "chain.sync_skipped_epochs", "--no-write", "--skip-calculator", "--epochs-file"} {
 		require.True(t, strings.Contains(cmd.Long, want), "Long 帮助应说明 %s", want)
 	}
 

@@ -34,20 +34,24 @@ import (
 )
 
 type options struct {
-	config  string
-	start   int64
-	end     int64
-	noWrite bool
+	config     string
+	start      int64
+	end        int64
+	epochsFile string
+	noWrite    bool
 }
 
-// Command 离线回放 EVM 转账派生数据（指定高度区间，只写派生表）
+// Command 离线回放 EVM 转账派生数据（指定高度区间或高度清单，只写派生表）
 func Command() *cobra.Command {
 	option := options{}
 	cmd := &cobra.Command{
-		Use:   "evm-transfer [-c|--config /path/to/config.toml] --start <高度> --end <高度> [--no-write]",
-		Short: "离线回放指定高度区间的 EVM 转账派生数据（不写同步指针/台账）",
-		Long: "离线回放 [--start, --end] 高度区间（左闭右闭）的 fevm EVM 转账派生数据，\n" +
-			"补 fevm.evm_transfers / fevm.evm_transfer_stats。\n\n" +
+		Use: "evm-transfer [-c|--config /path/to/config.toml] (--start <高度> --end <高度> | " +
+			"--epochs-file <清单文件>) [--no-write]",
+		Short: "离线回放指定高度区间/高度清单的 EVM 转账派生数据（不写同步指针/台账）",
+		Long: "离线回放高度区间 [--start, --end]（左闭右闭）或高度清单 [--epochs-file]（一行一个高度，\n" +
+			"升序逐个高度）的 fevm EVM 转账派生数据，补 fevm.evm_transfers / fevm.evm_transfer_stats。\n" +
+			"两者互斥：离散缺口（补几个高度）用清单，连续缺口用区间；清单模式下一个高度一个同步器，\n" +
+			"某高度失败只重跑该高度，且单个坏高度不阻断整批。\n\n" +
 			"固定以 syncer 的 Dry 模式运行：只执行任务（派生表写入），不写 chain.sync_syncers 进度指针、\n" +
 			"不写 chain.sync_task_epochs / chain.sync_syncer_epochs、不写 chain.sync_skipped_epochs 跳过台账，\n" +
 			"也不做链一致性检查与回滚。\n\n" +
@@ -62,8 +66,8 @@ func Command() *cobra.Command {
 				}
 			}()
 
-			// 区间解析与校验放在最前面：参数不合法就不去连任何生产依赖
-			rng, err := offlinereplay.ResolveRange(option.start, option.end)
+			// 计划解析与校验放在最前面：参数不合法就不去连任何生产依赖
+			plan, err := offlinereplay.ResolvePlan(option.start, option.end, option.epochsFile)
 			if err != nil {
 				return
 			}
@@ -73,38 +77,26 @@ func Command() *cobra.Command {
 				return
 			}
 			defer deps.Close()
-			log.Printf("离线回放高度区间: %s; %s", rng, offlinereplay.ConfLine(deps.Conf))
+			log.Printf("离线回放计划: %s; %s", plan, offlinereplay.ConfLine(deps.Conf))
 
 			target, writes := buildTarget(deps.DB, option.noWrite)
-			chunk, threshold := deps.EpochsConfig()
 
-			s, tel, err := offlinereplay.Assemble(offlinereplay.RunOptions{
-				From:            rng.From.Int64(),
-				To:              rng.To.Int64(),
-				NoWrite:         option.noWrite,
-				EpochsChunk:     chunk,
-				EpochsThreshold: threshold,
-			}, target, deps.DB, deps.Agg, deps.Adapter)
-			if err != nil {
-				return
-			}
-			tel.Writes = writes
+			opt := offlinereplay.RunOptions{NoWrite: option.noWrite}
+			opt.EpochsChunk, opt.EpochsThreshold = deps.EpochsConfig()
 
-			err = offlinereplay.Execute(s, tel, offlinereplay.RunOptions{
-				From: rng.From.Int64(), To: rng.To.Int64(), NoWrite: option.noWrite,
-			})
+			err = offlinereplay.Execute(plan, opt, target, deps.DB, deps.Agg, deps.Adapter, writes)
 		},
 	}
 
 	cmd.Flags().StringVarP(&option.config, "config", "c", "", "配置文件路径")
 	cmd.Flags().Int64VarP(&option.start, "start", "s", 0, "起始高度（含）")
 	cmd.Flags().Int64VarP(&option.end, "end", "e", 0, "截止高度（含）")
+	cmd.Flags().StringVar(&option.epochsFile, "epochs-file", "",
+		"高度清单文件（一行一个高度，可含空行与 # 注释；与 --start/--end 互斥；内部升序去重后逐个高度回放）")
 	cmd.Flags().BoolVar(&option.noWrite, "no-write", false,
 		"只统计不落库：跑完整条 task 管线但不写任何派生表，只输出统计")
 	cmd.Flags().SortFlags = false
 	_ = cmd.MarkFlagRequired("config")
-	_ = cmd.MarkFlagRequired("start")
-	_ = cmd.MarkFlagRequired("end")
 
 	return cmd
 }

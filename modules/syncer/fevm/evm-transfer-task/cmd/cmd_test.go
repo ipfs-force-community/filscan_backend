@@ -12,13 +12,17 @@ func TestCommandRegistrationAndFlags(t *testing.T) {
 	cmd := Command()
 	require.Equal(t, "evm-transfer", cmd.Name())
 
-	// --config / --start / --end 必填；--no-write 可选且默认关闭（默认真写）
-	required := []string{"config", "start", "end"}
-	for _, name := range required {
+	// --config 必填；--start/--end（区间）与 --epochs-file（清单）二选一 ⇒ 三者都不单独标记必填，
+	// 互斥与「必须给出其一」由 offline-replay.ResolvePlan 判定（见该包单测）。
+	cfg := cmd.Flags().Lookup("config")
+	require.NotNil(t, cfg, "缺少参数 config")
+	require.Equal(t, []string{"true"}, cfg.Annotations[cobra.BashCompOneRequiredFlag],
+		"参数 config 必须标记为必填")
+	for _, name := range []string{"start", "end", "epochs-file"} {
 		flag := cmd.Flags().Lookup(name)
 		require.NotNil(t, flag, "缺少参数 %s", name)
-		require.Equal(t, []string{"true"}, flag.Annotations[cobra.BashCompOneRequiredFlag],
-			"参数 %s 必须标记为必填", name)
+		require.Empty(t, flag.Annotations[cobra.BashCompOneRequiredFlag],
+			"参数 %s 不应是必填：区间与清单模式二选一", name)
 	}
 
 	noWrite := cmd.Flags().Lookup("no-write")
@@ -32,7 +36,7 @@ func TestCommandRegistrationAndFlags(t *testing.T) {
 
 	// 帮助文本要点名派生表与「不写指针/台账」，避免运维误用
 	for _, want := range []string{"fevm.evm_transfers", "fevm.evm_transfer_stats",
-		"chain.sync_syncers", "chain.sync_task_epochs", "chain.sync_skipped_epochs", "--no-write"} {
+		"chain.sync_syncers", "chain.sync_task_epochs", "chain.sync_skipped_epochs", "--no-write", "--epochs-file"} {
 		require.True(t, strings.Contains(cmd.Long, want), "Long 帮助应说明 %s", want)
 	}
 
