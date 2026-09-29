@@ -46,8 +46,8 @@ func (m MinerTaskDal) GetMinersAccWinCount(ctx context.Context, epochs chain.LOR
 		       miner,
 		       sum(win_count) as win_count		
 		from chain.miner_win_counts
-		where epoch >= ?
-		  and epoch < ?
+		where epoch > ?
+		  and epoch <= ?
 		group by miner;
 	`, epochs.GtBegin.Int64(), epochs.LteEnd.Int64()).Find(&items).Error
 	if err != nil {
@@ -71,8 +71,8 @@ func (m MinerTaskDal) GetMinersAccGasFees(ctx context.Context, epochs chain.LORC
 		       sum(wd_post_gas) as wd_post_gas,
 		       sum(seal_gas) as seal_gas
 		from chain.miner_gas_fees
-		where epoch >= ?
-		  and epoch < ?
+		where epoch > ?
+		  and epoch <= ?
 		group by miner;
 	`, epochs.GtBegin.Int64(), epochs.LteEnd.Int64()).Find(&fees).Error
 	if err != nil {
@@ -94,8 +94,8 @@ func (m MinerTaskDal) GetMinersAccRewards(ctx context.Context, epochs chain.LORC
 		       sum(reward) as reward,
 		       sum(block_count) as block_count
 		from chain.miner_rewards
-		where epoch >= ?
-		  and epoch < ?
+		where epoch > ?
+		  and epoch <= ?
 		group by miner;
 	`, epochs.GtBegin.Int64(), epochs.LteEnd.Int64()).Find(&rewards).Error
 	if err != nil {
