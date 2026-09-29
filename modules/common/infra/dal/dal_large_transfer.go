@@ -6,19 +6,21 @@ import (
 	"gitlab.forceup.in/fil-data-factory/filscan-backend/modules/common/infra/po"
 	"gitlab.forceup.in/fil-data-factory/filscan-backend/modules/common/repository"
 	"gitlab.forceup.in/fil-data-factory/filscan-backend/pkg/chain"
-	"gitlab.forceup.in/fil-data-factory/filscan-backend/utils/_dal"
 	"gorm.io/gorm"
 )
 
-func NewLargeTransferDal(db *gorm.DB) *LargeTransferDal {
-	return &LargeTransferDal{BaseDal: _dal.NewBaseDal(db)}
-}
+// 本文件是 chain.large_transfers 的**写入侧**（增量维护）实现。
+//
+// ⚠️ 类型与构造器 `LargeTransferDal` / `NewLargeTransferDal(db)` 声明在 **dal_biz_large_transfer.go**（读侧），
+// 两侧共用同一个 DAL 类型：读侧方法（LargeTransfersPage / CountLargeTransfers）与写侧方法
+// （ReplaceLargeTransfers / DeleteLargeTransfersFromEpoch）挂在同一个类型上，三个调用点
+// （agg_pg_large_amount.go、cmd/agg-parity/main.go、injector/syncer_manager.go）统一用
+// NewLargeTransferDal(db)。
+//
+// 合并注意：两条分支曾各自声明同名类型，直接合会编译失败（LargeTransferDal redeclared in this block），
+// 故此处不再重复声明。
 
 var _ repository.LargeTransferRepo = (*LargeTransferDal)(nil)
-
-type LargeTransferDal struct {
-	*_dal.BaseDal
-}
 
 // largeTransferInsertBatch 单次 INSERT 的行数上限。命中面极小（全链万行级、单高度通常 0~数行），
 // 这里只是防御性上限，不是为了吞吐。

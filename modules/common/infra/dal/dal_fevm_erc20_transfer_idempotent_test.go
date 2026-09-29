@@ -121,7 +121,7 @@ func requireNoOnConflict(t *testing.T, sqls []string) {
 	}
 }
 
-func insertStatements(sqls []string) (out []string) {
+func pickInsertStatements(sqls []string) (out []string) {
 	for _, s := range sqls {
 		if strings.HasPrefix(s, "INSERT INTO") {
 			out = append(out, s)
@@ -283,7 +283,7 @@ func TestCreateERC20TransferBatchKeepsBatchSize100(t *testing.T) {
 
 	sqls := cap.All()
 	requireNoOnConflict(t, sqls)
-	require.Len(t, insertStatements(sqls), 3, "250 行按 100 一批切成 3 条插入")
+	require.Len(t, pickInsertStatements(sqls), 3, "250 行按 100 一批切成 3 条插入")
 }
 
 // TestCreateERC20TransferBatchEmptyItemsNoSQL 空批次既不查库也不插入。
