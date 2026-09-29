@@ -23,6 +23,7 @@ import (
 	capital_task "gitlab.forceup.in/fil-data-factory/filscan-backend/modules/syncer/capital"
 	builtin_actor_task "gitlab.forceup.in/fil-data-factory/filscan-backend/modules/syncer/chain/builtin-actor-task"
 	deal_proposal_task "gitlab.forceup.in/fil-data-factory/filscan-backend/modules/syncer/chain/deal-proposal-task"
+	large_transfer_task "gitlab.forceup.in/fil-data-factory/filscan-backend/modules/syncer/chain/large-transfer-task"
 	message_count_task "gitlab.forceup.in/fil-data-factory/filscan-backend/modules/syncer/chain/message-count-task"
 	"gitlab.forceup.in/fil-data-factory/filscan-backend/modules/syncer/chain/reward_task"
 	trace_task "gitlab.forceup.in/fil-data-factory/filscan-backend/modules/syncer/chain/trace-task"
@@ -159,17 +160,32 @@ func NewSyncerManager(conf *config.Config, db *gorm.DB, agg londobell.Agg, miner
 	}
 	//opengateInitEpoch := int64(2685202)
 
+	// 链数据指标同步器的第一组任务（组内串行）。
+	//
+	// 大额转账增量维护（chain.large_transfers）挂在这里，理由：
+	//   - 这个同步器已经注册了 SetTracesBuilder，每个高度都会把该高度的 traces 原始文档放进 Datamap
+	//     ⇒ 复用现成数据，**不新增任何聚合器请求**（新建同步器或另起一次取 traces 都会让每高度成本翻倍）；
+	//   - 放在组内**最前**：本任务只依赖 traces。若排在其后，前面任一任务报错都会让整组提前返回，
+	//     该高度的增量就漏了（本任务自身不返回错误，所以也不会拖累后面的任务）；
+	//   - 开关 syncer.sync_large_transfers 默认关闭：关闭时**根本不注册**这个任务，
+	//     一个 SQL 都不发（连 chain.sync_task_epochs 都不会多行），行为与打补丁前完全一致。
+	chainTasks := make([]syncer.Task, 0, 4)
+	if conf.Syncer.SyncLargeTransfersValue() {
+		chainTasks = append(chainTasks, large_transfer_task.NewLargeTransferTask(dal.NewLargeTransferDal(db), true))
+	}
+	chainTasks = append(chainTasks,
+		trace_task.NewTraceTask(db, adapter),                           // 解析 Trace，记录高度手续费消耗等
+		builtin_actor_task.NewBaselineTask(dal.NewBaseLineTaskDal(db)), // 同步内置 Actor 状态, 爆块奖励依赖此任务
+		reward_task.NewMinerRewardTask(dal.NewRewardTaskDal(db)),       // 记录 Miner爆块奖励 及 WinCount
+	)
+
 	m := syncer.NewManager(enable, []*syncer.Syncer{
 		// 链数据指标同步器
 		newSyncer(conf, db, agg, adapter,
 			syncer.WithName(syncer.ChainSyncer),
 			syncer.WithContextBuilder(SetTracesBuilder),
 			syncer.WithTaskGroup(
-				[]syncer.Task{
-					trace_task.NewTraceTask(db, adapter),                           // 解析 Trace，记录高度手续费消耗等
-					builtin_actor_task.NewBaselineTask(dal.NewBaseLineTaskDal(db)), // 同步内置 Actor 状态, 爆块奖励依赖此任务
-					reward_task.NewMinerRewardTask(dal.NewRewardTaskDal(db)),       // 记录 Miner爆块奖励 及 WinCount
-				},
+				chainTasks,
 				[]syncer.Task{
 					deal_proposal_task.NewDealProposalTask(dal.NewDealProposalTaskDal(db)), // 记录订单提案
 				},

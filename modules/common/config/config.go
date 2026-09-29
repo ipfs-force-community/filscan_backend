@@ -117,6 +117,21 @@ type Syncer struct {
 	// StateGapJumpMargin 区间跳的目标高度 = 链头 − margin（留出安全边界，避免贴着链头被回滚）。
 	// 未配置或 <=0 时取同步器内置默认值 200。
 	StateGapJumpMargin *int64 `toml:"state_gap_jump_margin"`
+	// SyncLargeTransfers 是否开启「按高度把大额转账增量写进 PostgreSQL 表 chain.large_transfers」
+	// 这一步（默认 false）：关闭时同步器不会注册该任务，一个 SQL 都不发、行为与打补丁前完全一致；
+	// 开启后由 chain 同步器在**已有的** traces 获取链路上顺带维护（不新增聚合器请求）。
+	// 表结构见 migration/35.large_transfers.sql（在另一条工作线上）；写入口径见
+	// modules/syncer/chain/large-transfer-task/README.md。
+	SyncLargeTransfers *bool `toml:"sync_large_transfers"`
+}
+
+// SyncLargeTransfersValue 返回是否开启「大额转账增量维护」；未配置时返回 false（默认关闭）。
+// 与 Syncer 段其它开关一样用方法而不是直接解引用指针：老配置文件里没有该字段时不应 panic。
+func (s *Syncer) SyncLargeTransfersValue() bool {
+	if s == nil || s.SyncLargeTransfers == nil {
+		return false
+	}
+	return *s.SyncLargeTransfers
 }
 
 // DataErrorThresholdValue 返回配置的「数据级错误跳过阈值」；未配置时返回 0（由同步器回退到内置默认值 5）。
