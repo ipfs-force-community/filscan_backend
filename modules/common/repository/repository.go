@@ -85,6 +85,33 @@ type RewardTask interface {
 	DeleteMinerRewardStats(ctx context.Context, gteEpoch chain.Epoch) (err error)
 }
 
+type MinerRewardRange interface {
+	// MinerBlockRewardRange 逐 epoch 出块奖励（单矿工），区间左闭右开 [start, end)，
+	// 对齐聚合器端点 miner_blockreward 的分组口径（按 epoch 分组，按 epoch 升序返回）。
+	MinerBlockRewardRange(ctx context.Context, miner string, start, end chain.Epoch) (items []*bo.MinerEpochReward, err error)
+	// MinersBlockRewardRange 逐 epoch 逐矿工出块奖励，区间左闭右开 [start, end)，
+	// 对齐聚合器端点 miners_blockreward（按 epoch+miner 分组，按 epoch、miner 升序返回）。
+	MinersBlockRewardRange(ctx context.Context, start, end chain.Epoch) (items []*bo.MinerEpochReward, err error)
+	// MinerWinCountsRange 逐矿工 winCount 区间汇总 [start, end)，
+	// 对齐聚合器端点 wincount（按 miner 分组，按 miner 升序返回）。
+	// 注意：聚合器该端点还返回 TotalGasReward，PG 侧无对应列（见 dal 注释）。
+	MinerWinCountsRange(ctx context.Context, start, end chain.Epoch) (items []*bo.AccWinCount, err error)
+}
+
+// LargeAmountTransfer 大额转账列表端点（/aggregators/transfer_message_for_largeAmount）
+// 的 PG 读实现。该端点只吃 index/limit（没有高度区间），口径详见
+// modules/common/infra/dal/dal_biz_large_transfer.go 的文件头注释。
+type LargeAmountTransfer interface {
+	// LargeTransfersPage 取一页大额转账，按 (epoch desc, cid asc) 定序；
+	// offset/limit 由 dal.LargeTransferPageWindow(index, limit) 从请求的 index/limit 折算。
+	// 空页返回 nil（调用方据此复现聚合器 data:null 的形态），不是错误。
+	LargeTransfersPage(ctx context.Context, offset, limit int64) (items []*bo.LargeTransferRow, err error)
+	// CountLargeTransfers 全表行数（= 聚合器 TotalCount 对照值）。
+	// 关键口径：**count(*) 不去重**、**不按高度区间过滤**（表不存区间，请求也不带区间），
+	// 见 dal 注释里的三条理由。
+	CountLargeTransfers(ctx context.Context) (total int64, err error)
+}
+
 type BaseFeeTrendBizRepo interface {
 	GetStatBaseGasCost(ctx context.Context, epochs []chain.Epoch) (costs []*stat.BaseGasCost, err error)
 }
@@ -355,4 +382,19 @@ type CapitalRepo interface {
 	GetAddressRank(ctx context.Context) (result *probo.RichAccountRankList, err error)
 	GetLatestBalanceBeforeEpoch(ctx context.Context, address string, epoch *chain.Epoch) (balance decimal.Decimal, err error)
 	GetLatestBalanceAfterEpoch(ctx context.Context, address string, epoch *chain.Epoch) (balance decimal.Decimal, err error)
+}
+
+// LargeTransferRepo 大额转账预计算表 chain.large_transfers 的**增量维护**仓储（写入侧）。
+//
+// 实现约定（唯一的维护入口，幂等与失败策略都靠它）：
+//   - 没有主键、不能建唯一索引（线上口径要在同一高度同一 cid 上保留 trace 行重数），
+//     所以不做 upsert；ReplaceLargeTransfers 必须在**同一个事务**里先 delete 后批量 insert，
+//     否则崩溃/回滚会留下半截或重复行；
+//   - 同一高度重复调用（重试、回放）后的表内容必须与只调一次完全相同（delete-then-insert 天然满足）。
+type LargeTransferRepo interface {
+	// ReplaceLargeTransfers 用 items 整体替换该高度已有的行（先按 epoch 删除，再批量插入，同一事务）。
+	// items 为空表示「该高度没有大额转账」：仍然要执行删除（清掉该高度可能残留的旧行），只是不插入。
+	ReplaceLargeTransfers(ctx context.Context, epoch int64, items []*po.LargeTransfer) (err error)
+	// DeleteLargeTransfersFromEpoch 删除 >= gteEpoch 的行（链回滚时用；重跑会按 delete-then-insert 重写）。
+	DeleteLargeTransfersFromEpoch(ctx context.Context, gteEpoch chain.Epoch) (err error)
 }

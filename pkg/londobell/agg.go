@@ -699,6 +699,17 @@ type Msg struct {
 	From   chain.SmartAddress
 	To     chain.SmartAddress
 	Method int
+	// Value / MethodName：ExecTrace 的 Msg 子文档里本就存在、此前未被解码的两个字段。
+	//
+	// /aggregators/traces 的管道把整份 Msg 一起投影出来
+	// （londobell-aggregators/pool-monitor/traces.js 的 `Msg: "$Msg"`），而线上大额转账管道用的正是
+	// $Msg.Value 与 $Msg.MethodName（transfer_message_for_large_amount.js 的 $project）。
+	// 补上这两个字段，同步器的增量写入才能与线上管道逐字一致（不必退化成 message.Value / Detail.Method 兜底）。
+	//
+	// Value 用指针：nil = 响应里没有该字段（缺失或 null），用来把「字段不存在」与「值为 0」区分开，
+	// 以便严格对齐线上管道的 $Msg.Value 语义（值为 0 的消息在线上也不会进大额转账集合）。
+	Value      *decimal.Decimal
+	MethodName string
 }
 
 type MsgRct struct {

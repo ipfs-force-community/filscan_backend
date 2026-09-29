@@ -412,11 +412,93 @@ func (e ERC20Dal) GetERC20TransferInMessage(ctx context.Context, cid string) ([]
 	return out, err
 }
 
+// FilterExistingERC20Transfers 是 erc20 转账「先查后跳」守卫里不依赖数据库的纯计算部分：
+// 从 items 中剔除 (epoch, cid, index) 三元组已经存在于 existing（从库里查出来的已有行）的项，
+// 其余按原顺序保留。
+//
+// 为什么幂等只能放应用层：fevm.erc_20_transfers 上有 INSERT 规则
+// （range_insert_action_rule ⇒ fevm.action_erc_20_transfers_range_insert），
+// PG 对带 INSERT/UPDATE 规则的表直接禁止 ON CONFLICT
+// （SQLSTATE 0A000: INSERT with ON CONFLICT clause cannot be used with table that has
+// INSERT or UPDATE rules），加上会让所有写入硬报错。唯一键是 UNIQUE (epoch, cid, "index")
+// （必须含分区键 epoch），所以认行的键就是这个三元组。
+func FilterExistingERC20Transfers(existing, items []*po.FEvmERC20Transfer) []*po.FEvmERC20Transfer {
+	type transferKey struct {
+		epoch int64
+		cid   string
+		index int
+	}
+
+	if len(items) == 0 {
+		return nil
+	}
+	if len(existing) == 0 {
+		return items
+	}
+
+	seen := make(map[transferKey]struct{}, len(existing))
+	for _, v := range existing {
+		if v == nil {
+			continue
+		}
+		seen[transferKey{epoch: v.Epoch, cid: v.Cid, index: v.Index}] = struct{}{}
+	}
+	if len(seen) == 0 {
+		return items
+	}
+
+	out := make([]*po.FEvmERC20Transfer, 0, len(items))
+	for _, v := range items {
+		if v == nil {
+			continue
+		}
+		if _, ok := seen[transferKey{epoch: v.Epoch, cid: v.Cid, index: v.Index}]; ok {
+			continue
+		}
+		out = append(out, v)
+	}
+	return out
+}
+
 func (e ERC20Dal) CreateERC20TransferBatch(ctx context.Context, items []*po.FEvmERC20Transfer) (err error) {
 	db, err := e.DB(ctx)
 	if err != nil {
 		return
 	}
+	if len(items) == 0 {
+		return
+	}
+	// 这张表是 PG 分区表且带 INSERT 规则（range_insert_action_rule），所以 ON CONFLICT 不可用：
+	// PG 会直接报 SQLSTATE 0A000 让每一次写入都失败（实测重跑已写过的 100 个高度全红、框架
+	// 无限重试）。幂等因此只能放应用层「先查后跳」：按本批 epoch 查出库里已有的
+	// (epoch, cid, index)，过滤掉已写入的行再插入。重叠分片回放 / 同步重试天然跳过已有行，
+	// 既不会重复写，也不会撞唯一键卡死该高度。批量大小仍为 100。
+	epochSet := make(map[int64]struct{}, len(items))
+	for _, v := range items {
+		if v == nil {
+			continue
+		}
+		epochSet[v.Epoch] = struct{}{}
+	}
+	if len(epochSet) == 0 {
+		return
+	}
+	epochs := make([]int64, 0, len(epochSet))
+	for k := range epochSet {
+		epochs = append(epochs, k)
+	}
+
+	var existing []*po.FEvmERC20Transfer
+	err = db.Select("epoch", "cid", "index").Where("epoch in ?", epochs).Find(&existing).Error
+	if err != nil {
+		return
+	}
+
+	items = FilterExistingERC20Transfers(existing, items)
+	if len(items) == 0 {
+		return
+	}
+
 	err = db.CreateInBatches(items, 100).Error
 	return
 }
@@ -426,6 +508,9 @@ func (e ERC20Dal) CreateERC20SwapInfoBatch(ctx context.Context, items []*po.FEvm
 	if err != nil {
 		return
 	}
+	// 该表当前既没有唯一键也没有 INSERT 规则，裸写即可；这里绝不能再加 ON CONFLICT ——
+	// 一旦该表也按分区表声明（chain_partition_declare 会挂 INSERT 规则），
+	// ON CONFLICT 会让写入整体报 SQLSTATE 0A000 而不是被忽略。
 	err = db.CreateInBatches(items, 100).Error
 	return
 }

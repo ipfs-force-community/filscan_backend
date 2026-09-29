@@ -21,6 +21,22 @@ func NewTestContext(adapter londobell.Adapter, agg londobell.Agg, epoch chain.Ep
 	}
 }
 
+// NewTestContextWithData 构造带 Datamap 数据的测试上下文：先按 values 填充 Datamap，再返回 Context。
+//
+// 仅供单测使用（与 NewTestContext 同一用途）：任务从 Datamap 里取 traces 这类依赖，单测需要能
+// 直接构造出「已经有 traces 的高度」。empty 用于模拟空高度（SetTracesBuilder 在空高度写入 nil）。
+func NewTestContextWithData(adapter londobell.Adapter, agg londobell.Agg, epoch chain.Epoch, empty bool, values map[DataKey]any) (*Context, error) {
+	c := NewTestContext(adapter, agg, epoch)
+	c.empty = empty
+	c.datamap = &Datamap{}
+	for k, v := range values {
+		if err := c.datamap.Set(k, v); err != nil {
+			return nil, err
+		}
+	}
+	return c, nil
+}
+
 var _ logging.StandardLogger = (*Context)(nil)
 
 type Context struct {
