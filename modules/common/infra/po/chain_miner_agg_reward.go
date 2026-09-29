@@ -10,5 +10,5 @@ type MinerAggReward struct {
 }
 
 func (MinerAggReward) TableName() string {
-	return "chain.miner_age_rewards"
+	return "chain.miner_agg_rewards"
 }
