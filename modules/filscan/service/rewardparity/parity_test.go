@@ -87,30 +87,77 @@ func TestCompareMinersBlockRewardNormalizesAddressForm(t *testing.T) {
 	}
 }
 
-// wincount：WinCount 必须逐值相等；gasReward 非 0 时显式记为差异（PG 无来源）。
+// wincount：WinCount 必须逐值相等；PG 的 gas_reward 未回填（NULL）时显式记 Unresolved 并跳过逐值比对。
 func TestCompareWinCountGasRewardGap(t *testing.T) {
 	agg := []*londobell.MinerWinCount{
 		{Id: "01234", TotalWinCount: 5, TotalGasReward: decimal.NewFromInt(100)},
 	}
-	pg := []*bo.AccWinCount{{Miner: "f01234", WinCount: 5}}
+	pg := []*bo.AccWinCount{{Miner: "f01234", WinCount: 5, TotalRows: 1}}
 	r := CompareWinCount(testParams, agg, pg, 10)
-	if r.Pass(false) {
-		t.Fatal("gasReward 有值而 PG 无来源时必须 FAIL")
+	if !r.Pass(false) {
+		t.Fatalf("未回填区间不应报字段差异（PG sum 本身残缺，报了是噪声）: diffs=%+v", r.Diffs)
+	}
+	if len(r.Unresolved) == 0 {
+		t.Error("必须声明 TotalGasReward 在本区间尚未回填")
+	}
+}
+
+// wincount：PG 的 gas_reward 齐了就必须逐值比对 —— 不等要 FAIL，相等（含 0）要 PASS。
+func TestCompareWinCountGasRewardComparedWhenBackfilled(t *testing.T) {
+	gas := decimal.NewFromInt(100)
+	agg := []*londobell.MinerWinCount{{Id: "01234", TotalWinCount: 5, TotalGasReward: gas}}
+	pg := []*bo.AccWinCount{{Miner: "f01234", WinCount: 5, GasReward: &gas, TotalRows: 2, GasRewardRows: 2}}
+	if r := CompareWinCount(testParams, agg, pg, 10); !r.Pass(true) {
+		t.Fatalf("已回填且逐值相等应 PASS: diffs=%+v unresolved=%v", r.Diffs, r.Unresolved)
+	}
+	if r := CompareWinCount(testParams, agg, pg, 10); !r.AggSumGas.Equal(r.PgSumGas) {
+		t.Errorf("汇总 gasReward 应相等: agg=%s pg=%s", r.AggSumGas, r.PgSumGas)
+	}
+
+	other := decimal.NewFromInt(101)
+	pg[0].GasReward = &other
+	r := CompareWinCount(testParams, agg, pg, 10)
+	if r.Pass(true) {
+		t.Fatal("已回填但数值不等必须 FAIL")
 	}
 	if len(r.Diffs) != 1 || r.Diffs[0].Field != "TotalGasReward" {
 		t.Errorf("应有一条 TotalGasReward 差异，得到 %+v", r.Diffs)
 	}
-	if len(r.Unresolved) == 0 {
-		t.Error("必须声明 TotalGasReward 无 PG 来源")
+	if len(r.Unresolved) != 0 {
+		t.Errorf("已回填时不应有 Unresolved，得到 %v", r.Unresolved)
 	}
 }
+
+// wincount：同一区间内只要有一行没回填，整区间跳过 TotalGasReward 逐值比对（部分回填同样算残缺）。
+func TestCompareWinCountGasRewardPartiallyBackfilled(t *testing.T) {
+	gas := decimal.NewFromInt(100)
+	agg := []*londobell.MinerWinCount{
+		{Id: "01234", TotalWinCount: 5, TotalGasReward: gas},
+		{Id: "05678", TotalWinCount: 1, TotalGasReward: decimal.Zero},
+	}
+	pg := []*bo.AccWinCount{
+		{Miner: "f01234", WinCount: 5, GasReward: &gas, TotalRows: 2, GasRewardRows: 2},
+		// 第二行 3 条去重行里只有 1 条有 gas_reward ⇒ 残缺
+		{Miner: "f05678", WinCount: 1, TotalRows: 3, GasRewardRows: 1},
+	}
+	pg[1].GasReward = &zero
+	r := CompareWinCount(testParams, agg, pg, 10)
+	if len(r.Unresolved) == 0 {
+		t.Error("部分回填必须记 Unresolved")
+	}
+	if !r.Pass(false) {
+		t.Errorf("部分回填时不应报字段差异: %+v", r.Diffs)
+	}
+}
+
+var zero = decimal.Zero
 
 // gasReward 本来就是 0（老管线不产出该字段）时不应产生差异。
 func TestCompareWinCountZeroGasRewardIsClean(t *testing.T) {
 	agg := []*londobell.MinerWinCount{
 		{Id: "01234", TotalWinCount: 5, TotalGasReward: decimal.Zero},
 	}
-	pg := []*bo.AccWinCount{{Miner: "f01234", WinCount: 5}}
+	pg := []*bo.AccWinCount{{Miner: "f01234", WinCount: 5, GasReward: &zero, TotalRows: 1, GasRewardRows: 1}}
 	r := CompareWinCount(testParams, agg, pg, 10)
 	if !r.Pass(true) {
 		t.Fatalf("应 PASS: diffs=%+v", r.Diffs)

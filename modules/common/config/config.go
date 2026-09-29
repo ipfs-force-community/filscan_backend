@@ -48,8 +48,11 @@ type Feature struct {
 	// 改读 PG 表 chain.miner_rewards。
 	MinersBlockRewardReadFromPg *bool `toml:"miners_blockreward_read_from_pg"`
 	// MinerWinCountReadFromPg 聚合器端点 wincount（逐矿工 winCount + gasReward）
-	// 改读 PG 表 chain.miner_win_counts。注意：PG 无 gas_reward 列，开启后
-	// TotalGasReward 恒为 0（详见 agg_pg_reward.go 的说明与 parity 工具的 UNRESOLVED 字段）。
+	// 改读 PG 表 chain.miner_win_counts（gas_reward 列见 migration/36）。
+	// 注意：gas_reward 是 migration/36 起才写入的，历史行是 NULL；读路径遇到区间内还有
+	// NULL 的行会**整体回落聚合器**（不拿 0 顶），所以开关打开后旧区间的行为与今天完全一致，
+	// 只有「已回填 + 新写入」的区间才真正走 PG。详见 agg_pg_reward.go 与
+	// ops/wincount_gas_reward/README.md。
 	MinerWinCountReadFromPg *bool `toml:"miner_wincount_read_from_pg"`
 	// LargeAmountReadFromPg 聚合器端点 transfer_message_for_largeAmount（大额转账列表，FIL>=10000）
 	// 改读 PG 表 chain.large_transfers（migration/35.large_transfers.sql）。

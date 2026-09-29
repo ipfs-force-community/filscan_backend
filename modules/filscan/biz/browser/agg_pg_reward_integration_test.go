@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"math/big"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -46,66 +47,7 @@ func TestPgRewardAggMatchesAggregator(t *testing.T) {
 	}
 
 	// 聚合器 stub：返回 londobell 线上响应形态（data 里的金额是 decimal128 的字符串形态）。
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		var req struct {
-			Start *int64 `json:"start"`
-			End   *int64 `json:"end"`
-		}
-		_ = json.NewDecoder(r.Body).Decode(&req)
-		start, end := int64(0), int64(0)
-		if req.Start != nil {
-			start = *req.Start
-		}
-		if req.End != nil {
-			end = *req.End
-		}
-		var data interface{}
-		switch {
-		case strings.HasSuffix(r.URL.Path, "/miner_blockreward"):
-			var rows []map[string]interface{}
-			for _, rw := range probeRewards {
-				if rw.epoch >= start && rw.epoch < end && rw.miner == "01111" {
-					rows = append(rows, map[string]interface{}{
-						"_id": rw.epoch, "TotalBlockReward": rw.reward, "BlockCount": rw.blockCount,
-					})
-				}
-			}
-			data = rows
-		case strings.HasSuffix(r.URL.Path, "/miners_blockreward"):
-			var rows []map[string]interface{}
-			for _, rw := range probeRewards {
-				if rw.epoch >= start && rw.epoch < end {
-					rows = append(rows, map[string]interface{}{
-						"_id":              map[string]interface{}{"Epoch": rw.epoch, "Miner": rw.miner},
-						"TotalBlockReward": rw.reward,
-						"BlockCount":       rw.blockCount,
-					})
-				}
-			}
-			data = rows
-		case strings.HasSuffix(r.URL.Path, "/wincount"):
-			sum := map[string]int64{}
-			for _, rw := range probeRewards {
-				if rw.epoch >= start && rw.epoch < end {
-					sum[rw.miner] += rw.blockCount
-				}
-			}
-			var rows []map[string]interface{}
-			for _, miner := range []string{"01111", "02222"} {
-				if v, ok := sum[miner]; ok {
-					rows = append(rows, map[string]interface{}{
-						"_id": miner, "TotalWinCount": v, "TotalGasReward": "0",
-					})
-				}
-			}
-			data = rows
-		default:
-			http.NotFound(w, r)
-			return
-		}
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(map[string]interface{}{"code": "0", "msg": "", "data": data})
-	}))
+	srv := newWincountProbeAggServer(t)
 	defer srv.Close()
 
 	agg := londobellimpl.NewLondobellAggImpl(srv.URL, resty.New())
@@ -163,7 +105,7 @@ func TestPgRewardAggMatchesAggregator(t *testing.T) {
 		}
 	}
 
-	// 3) wincount：TotalWinCount 逐值相等（重复行不得放大）；TotalGasReward 无 PG 来源，恒 0
+	// 3) wincount：TotalWinCount / TotalGasReward 逐值相等（重复行不得放大；gas_reward 逐值比对）
 	aggWins, err := agg.WinCount(ctx, start, end)
 	if err != nil {
 		t.Fatalf("聚合器 wincount 失败: %s", err)
@@ -180,8 +122,56 @@ func TestPgRewardAggMatchesAggregator(t *testing.T) {
 			aggWins[i].TotalWinCount != pgWins[i].TotalWinCount {
 			t.Errorf("wincount[%d] 不一致: 聚合器 %+v vs PG %+v", i, aggWins[i], pgWins[i])
 		}
-		if !pgWins[i].TotalGasReward.IsZero() {
-			t.Errorf("wincount[%d].TotalGasReward 应恒 0（PG 无该列），得到 %s", i, pgWins[i].TotalGasReward.String())
+		if aggWins[i].TotalGasReward.String() != pgWins[i].TotalGasReward.String() {
+			t.Errorf("wincount[%d].TotalGasReward 不一致: 聚合器 %q vs PG %q",
+				i, aggWins[i].TotalGasReward.String(), pgWins[i].TotalGasReward.String())
+		}
+	}
+}
+
+// gas_reward 尚未回填（NULL）的区间必须**回落聚合器**而不是返回 0：
+// TotalGasReward 的消费点 acl_block_chain.GetBlockDetails 拿它算 TxFeeReward / MinedReward。
+// 这里直接把 probe 表里的 gas_reward 置回 NULL，模拟 migration/36 之后还没回填的历史分区。
+func TestPgRewardWinCountFallsBackWhenGasRewardNotBackfilled(t *testing.T) {
+	dsn := os.Getenv("FILSCAN_PG_PARITY_DSN")
+	if dsn == "" {
+		t.Skip("未设置 FILSCAN_PG_PARITY_DSN，跳过（集成测试需要一次性 PG）")
+	}
+	if !strings.Contains(dsn, "test") && !strings.Contains(dsn, "probe") {
+		t.Skipf("DSN 必须指向一次性库（库名含 test/probe），当前: %s", dsn)
+	}
+
+	db, err := gorm.Open(postgres.Open(dsn), &gorm.Config{})
+	if err != nil {
+		t.Fatalf("连接 PG 失败: %s", err)
+	}
+	if err := prepareProbeTables(db); err != nil {
+		t.Fatalf("准备探针表失败: %s", err)
+	}
+	// 只把 epoch 1001（f01111）那一行置回 NULL —— 同一请求区间内「部分回填」
+	if err := db.Exec(`update chain.miner_win_counts set gas_reward = null where epoch = 1001`).Error; err != nil {
+		t.Fatalf("置 NULL 失败: %s", err)
+	}
+
+	srv := newWincountProbeAggServer(t)
+	defer srv.Close()
+
+	agg := londobellimpl.NewLondobellAggImpl(srv.URL, resty.New())
+	wrapped := NewPgRewardAgg(agg, db, &config.Config{Feature: &config.Feature{
+		MinerWinCountReadFromPg: boolPtrLocal(true),
+	}})
+
+	rows, err := wrapped.WinCount(context.Background(), chain.Epoch(1000), chain.Epoch(1003))
+	if err != nil {
+		t.Fatalf("wincount 失败: %s", err)
+	}
+	// 回落 ⇒ 拿到的是聚合器侧的值（含非 0 的 gas reward），不是被 0 顶过的 PG 值
+	if len(rows) != 2 {
+		t.Fatalf("应回落聚合器拿到 2 行，得到 %d 行", len(rows))
+	}
+	for _, row := range rows {
+		if row.Id == "01111" && row.TotalGasReward.String() != "89145023322864" {
+			t.Errorf("未回填区间应回落聚合器（gasReward=89145023322864），得到 %q", row.TotalGasReward.String())
 		}
 	}
 }
@@ -191,14 +181,17 @@ type probeReward struct {
 	miner      string
 	reward     string
 	blockCount int64
+	// gasReward 该 (epoch,miner) 的 gas_reward（attoFIL）。故意给不同的非零值 +
+	// 一个 0：0 是聚合器的合法取值，必须和「未回填的 NULL」区分开。
+	gasReward string
 }
 
 // 与 probe 库/ stub 一致的数据；miner_rewards 每行是该 (epoch,miner) 的聚合值。
 var probeRewards = []probeReward{
-	{1000, "01111", "4860000000000000000", 2},
-	{1001, "01111", "2430000000000000000", 1},
-	{1002, "02222", "2430000000000000000", 1},
-	{1003, "01111", "7290000000000000000", 3}, // 右端点外
+	{1000, "01111", "4860000000000000000", 2, "89145023322864"},
+	{1001, "01111", "2430000000000000000", 1, "0"},
+	{1002, "02222", "2430000000000000000", 1, "214208455099239"},
+	{1003, "01111", "7290000000000000000", 3, "1"}, // 右端点外
 }
 
 // prepareProbeTables 复刻 migration/1.chain.sql 的两张表（含「win_counts 索引非唯一且 on only」的现实），
@@ -213,7 +206,8 @@ func prepareProbeTables(db *gorm.DB) error {
 		`create table chain.miner_rewards_p0 partition of chain.miner_rewards for values from (0) to (1000000)`,
 		`create unique index miner_rewards_epoch_miner_uindex on chain.miner_rewards using btree (epoch, miner)`,
 		`drop table if exists chain.miner_win_counts cascade`,
-		`create table chain.miner_win_counts (epoch bigint, miner varchar, win_count bigint) partition by range (epoch)`,
+		// gas_reward 列 = migration/36.miner_win_counts_gas_reward.sql 的效果
+		`create table chain.miner_win_counts (epoch bigint, miner varchar, win_count bigint, gas_reward numeric) partition by range (epoch)`,
 		`create table chain.miner_win_counts_p0 partition of chain.miner_win_counts for values from (0) to (1000000)`,
 		`create index miner_win_counts_epoch_miner_index on only chain.miner_win_counts using btree (epoch, miner)`,
 		`create index miner_win_counts_miner_epoch_index on only chain.miner_win_counts using btree (miner, epoch)`,
@@ -222,11 +216,11 @@ func prepareProbeTables(db *gorm.DB) error {
 		statements = append(statements, fmt.Sprintf(
 			`insert into chain.miner_rewards (epoch, miner, reward, block_count, block_time) values (%d, 'f%s', %s, %d, '2021-01-01 00:00:00')`,
 			rw.epoch, rw.miner, rw.reward, rw.blockCount))
-		// 每行故意插 3 份完全相同的 win_count（模拟纯 INSERT 重跑同一高度）
+		// 每行故意插 3 份完全相同的 win_count/gas_reward（模拟纯 INSERT 重跑同一高度）
 		for i := 0; i < 3; i++ {
 			statements = append(statements, fmt.Sprintf(
-				`insert into chain.miner_win_counts (epoch, miner, win_count) values (%d, 'f%s', %d)`,
-				rw.epoch, rw.miner, rw.blockCount))
+				`insert into chain.miner_win_counts (epoch, miner, win_count, gas_reward) values (%d, 'f%s', %d, %s)`,
+				rw.epoch, rw.miner, rw.blockCount, rw.gasReward))
 		}
 	}
 	for _, s := range statements {
@@ -246,3 +240,78 @@ func firstLine(s string) string {
 }
 
 func boolPtrLocal(v bool) *bool { return &v }
+
+// newWincountProbeAggServer 起一个聚合器 stub：按 probeRewards 复现三个端点的响应形态
+// （金额是 decimal128 的字符串形态，_id 是**不带前缀**的 0… 地址）。两个集成测试共用。
+func newWincountProbeAggServer(t *testing.T) *httptest.Server {
+	t.Helper()
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			Start *int64 `json:"start"`
+			End   *int64 `json:"end"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		start, end := int64(0), int64(0)
+		if req.Start != nil {
+			start = *req.Start
+		}
+		if req.End != nil {
+			end = *req.End
+		}
+		var data interface{}
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/miner_blockreward"):
+			var rows []map[string]interface{}
+			for _, rw := range probeRewards {
+				if rw.epoch >= start && rw.epoch < end && rw.miner == "01111" {
+					rows = append(rows, map[string]interface{}{
+						"_id": rw.epoch, "TotalBlockReward": rw.reward, "BlockCount": rw.blockCount,
+					})
+				}
+			}
+			data = rows
+		case strings.HasSuffix(r.URL.Path, "/miners_blockreward"):
+			var rows []map[string]interface{}
+			for _, rw := range probeRewards {
+				if rw.epoch >= start && rw.epoch < end {
+					rows = append(rows, map[string]interface{}{
+						"_id":              map[string]interface{}{"Epoch": rw.epoch, "Miner": rw.miner},
+						"TotalBlockReward": rw.reward,
+						"BlockCount":       rw.blockCount,
+					})
+				}
+			}
+			data = rows
+		case strings.HasSuffix(r.URL.Path, "/wincount"):
+			sumWin := map[string]int64{}
+			sumGas := map[string]*big.Int{}
+			for _, rw := range probeRewards {
+				if rw.epoch >= start && rw.epoch < end {
+					sumWin[rw.miner] += rw.blockCount
+					g, ok := sumGas[rw.miner]
+					if !ok {
+						g = new(big.Int)
+						sumGas[rw.miner] = g
+					}
+					v, _ := new(big.Int).SetString(rw.gasReward, 10)
+					g.Add(g, v)
+				}
+			}
+			var rows []map[string]interface{}
+			for _, miner := range []string{"01111", "02222"} {
+				if v, ok := sumWin[miner]; ok {
+					rows = append(rows, map[string]interface{}{
+						// 金额给 decimal128 的字符串形态（与线上一致）
+						"_id": miner, "TotalWinCount": v, "TotalGasReward": sumGas[miner].String(),
+					})
+				}
+			}
+			data = rows
+		default:
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{"code": "0", "msg": "", "data": data})
+	}))
+}

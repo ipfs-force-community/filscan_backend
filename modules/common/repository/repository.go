@@ -92,9 +92,10 @@ type MinerRewardRange interface {
 	// MinersBlockRewardRange 逐 epoch 逐矿工出块奖励，区间左闭右开 [start, end)，
 	// 对齐聚合器端点 miners_blockreward（按 epoch+miner 分组，按 epoch、miner 升序返回）。
 	MinersBlockRewardRange(ctx context.Context, start, end chain.Epoch) (items []*bo.MinerEpochReward, err error)
-	// MinerWinCountsRange 逐矿工 winCount 区间汇总 [start, end)，
+	// MinerWinCountsRange 逐矿工 winCount + gasReward 区间汇总 [start, end)，
 	// 对齐聚合器端点 wincount（按 miner 分组，按 miner 升序返回）。
-	// 注意：聚合器该端点还返回 TotalGasReward，PG 侧无对应列（见 dal 注释）。
+	// TotalGasReward 对应 gas_reward 列（migration/36）；该列为 NULL 时 GasReward 为 nil，
+	// 调用方必须回落聚合器（见 agg_pg_reward.go 的 incompleteGasRewardRow）。
 	MinerWinCountsRange(ctx context.Context, start, end chain.Epoch) (items []*bo.AccWinCount, err error)
 }
 

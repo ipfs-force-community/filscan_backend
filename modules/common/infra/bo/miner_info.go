@@ -44,6 +44,17 @@ type AccGasFee struct {
 type AccWinCount struct {
 	Miner    string
 	WinCount int64
+	// GasReward 区间内 gas 奖励之和（attoFIL，对齐聚合器 wincount 的 TotalGasReward）。
+	//
+	// 用**指针**表达 NULL：chain.miner_win_counts.gas_reward 在 migration/36 之前的行、
+	// 以及尚未回填的行上是 NULL，而 sum() 遇到全 NULL 得 NULL。
+	// NULL ⇒「本区间还没回填」⇒ 调用方（agg_pg_reward.go）必须回落聚合器，
+	// 不能当 0 用（0 是聚合器的合法取值）。
+	GasReward *decimal.Decimal
+	// TotalRows / GasRewardRows 去重后的行数 / 其中有 gas_reward 的行数。
+	// GasRewardRows < TotalRows ⇒ 区间内还有未回填行 ⇒ 汇总值不完整。
+	TotalRows     int64
+	GasRewardRows int64
 }
 
 type AccReward struct {

@@ -1,0 +1,96 @@
+-- migration/36.miner_win_counts_gas_reward.sql
+--
+-- 给 chain.miner_win_counts 补 gas_reward 列 —— 聚合器 wincount 端点 TotalGasReward 的 PG 来源。
+--
+-- ===== 口径事实源（改这一列前先把下面三段读完）=====
+--
+-- 1) 这个值是什么
+--    聚合器端点 /aggregators/wincount 的管线（londobell-aggregators/pool-monitor/wincount_zl.js）：
+--        $match  {Epoch∈[s,e), Depth:1, Msg.From:"00", Msg.To:"02", Msg.Method:2}   -- ExecTrace
+--        $lookup Message by Cid
+--        $group  {_id: Message.Detail.Params.Miner,
+--                 TotalWinCount:  $sum Message.Detail.Params.WinCount,
+--                 TotalGasReward: $sum {$toDecimal: Message.Detail.Params.GasReward}}
+--    那条消息是 RewardActor.AwardBlockReward 的隐式消息（系统 actor f00 → 奖励 actor f02，方法 2），
+--    其 params 类型是 specs-actors v0.9.15 actors/builtin/reward/reward_actor.go:56
+--        AwardBlockRewardParams{Miner, Penalty, GasReward, WinCount}
+--    ⇒ WinCount 与 GasReward **同一条消息、同一次响应**，落库不需要新数据源。
+--
+-- 2) 同步器本来就拿到了它
+--    modules/syncer/chain/reward_task/reward_task.go 的 Exec 调 ctx.Agg().WinCount(epoch, epoch+1)
+--    （= 上面这个端点），响应里的 TotalGasReward 之前被丢弃（PO 只有 3 列）。
+--    36 号迁移 + 本次代码改动之后，win_count 与 gas_reward 一批落盘，**不增加任何聚合器请求**。
+--
+-- 3) 线上分区事实（2026-09-30 只读核查，pg_class/pg_inherits/pg_rules）
+--    * chain.miner_win_counts: relkind='p'（RANGE(epoch) 分区父表），317 个周分区（relkind='r'），
+--      每分区 20160 个 epoch，最新分区 miner_win_counts_w40_2026_09_28_6407280_6427440。
+--    * 父表上有一条 INSERT 规则：
+--        CREATE RULE range_insert_action_rule AS ON INSERT TO chain.miner_win_counts
+--          DO INSTEAD SELECT chain.action_miner_win_counts_range_insert(new.*);
+--      函数体是 `INSERT INTO <partition> SELECT $1.*`（按**复合类型整行**展开，不写死列名），
+--      并在分区缺失时用 public.chain_partition_create 现建 ⇒ 加列后规则本身无需改动。
+--    * 同一套规则/函数也存在于 chain.miner_rewards（本迁移只动 miner_win_counts）。
+--
+-- ===== 三条硬约束 =====
+--
+--   (1) **必须不带 ONLY** 地 ADD COLUMN：PG13 会把新列级联到全部 317 个分区。
+--       若写成 `alter table only ...`，分区就比父表少一列，规则里的 `SELECT $1.*`
+--       会因列数不匹配直接报错 —— 整条 win_counts 写入路径全挂（同步器每个高度都写这张表）。
+--
+--   (2) **不给 default、允许 NULL**：0 是聚合器的**合法取值**（线上实测 epoch 6330000 有 10 个
+--       (epoch,miner) 的 TotalGasReward 就是 "0"），所以 0 与「migration 之前/尚未回填」必须可区分。
+--       读路径（agg_pg_reward.go 的 incompleteGasRewardRow）靠 NULL 判定并回落聚合器，
+--       拿 0 顶会让 acl_block_chain.GetBlockDetails 的 TxFeeReward / MinedReward 算错。
+--
+--   (3) **不要用 ON CONFLICT**：本表（和 miner_rewards）带 INSERT 规则，PG 直接拒绝
+--       `ON CONFLICT clause is not supported on tables with INSERT rules`。
+--       ⇒ 写路径保持纯 INSERT；历史回填只能走 UPDATE（见 ops/wincount_gas_reward/02_backfill.sql）。
+--
+-- ===== 执行方式 =====
+--   迁移本身只是一条 DDL，直接跑本文件即可（幂等：IF NOT EXISTS）。
+--   跑完**必须**执行文件末尾的「后检」两条，都应为 0 / 全部一致。
+--   回填与验收见 ops/wincount_gas_reward/README.md。
+
+alter table chain.miner_win_counts add column if not exists gas_reward numeric;
+
+-- ===== 后检 1：是否所有分区都拿到了 gas_reward 列（应为 0）=====
+--
+-- select count(*) as partitions_missing_gas_reward
+-- from pg_inherits i
+--          join pg_class c on c.oid = i.inhrelid
+-- where i.inhparent = 'chain.miner_win_counts'::regclass
+--   and not exists (select 1
+--                   from pg_attribute a
+--                   where a.attrelid = c.oid
+--                     and a.attname = 'gas_reward'
+--                     and a.attnum > 0
+--                     and not a.attisdropped);
+--
+-- ===== 后检 2：gas_reward 的列序号在父表与每个分区上必须一致（应为 0 行不一致）=====
+-- 序号不一致会让规则里的 `SELECT $1.*` 把值塞进错误的列（同名列不同位 → 静默错位）。
+--
+-- with parent as (select a.attnum as n
+--                 from pg_attribute a
+--                 where a.attrelid = 'chain.miner_win_counts'::regclass
+--                   and a.attname = 'gas_reward')
+-- select c.relname, a.attnum as partition_attnum, (select n from parent) as parent_attnum
+-- from pg_inherits i
+--          join pg_class c on c.oid = i.inhrelid
+--          join pg_attribute a on a.attrelid = c.oid and a.attname = 'gas_reward' and a.attnum > 0
+-- where i.inhparent = 'chain.miner_win_counts'::regclass
+--   and a.attnum <> (select n from parent);
+--
+-- ===== 后检 3（可选，写入路径冒烟）：规则仍然能整行展开 =====
+-- 随便挑一个**已存在**的周分区，插一行再删掉；只要不报
+-- 「INSERT has more expressions than target columns」之类，就说明 `$1.*` 仍然对得上。
+--   begin;
+--   insert into chain.miner_win_counts (epoch, miner, win_count, gas_reward)
+--   values (-1, 'f0smoke', 0, 0);
+--   rollback;
+--
+-- ===== 回滚 =====
+-- 完整回滚（含回填数据的处理）见 ops/wincount_gas_reward/90_rollback.sql。
+-- 单条最小回滚（列还在、只是不再使用）：
+--   alter table chain.miner_win_counts drop column if exists gas_reward;
+-- ⚠ 回滚前必须先确认**代码已回滚**（写路径还在写 gas_reward 时把列删掉，
+--   下一次同步的 INSERT 会因为列不存在而失败）。

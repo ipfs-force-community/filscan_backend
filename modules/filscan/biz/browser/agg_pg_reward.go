@@ -38,11 +38,19 @@ import (
 //
 //	miner_blockreward  : Epoch=epoch、TotalBlockReward=reward、BlockCount=block_count  —— 完全对齐
 //	miners_blockreward : Epoch/Miner、TotalBlockReward=reward、BlockCount=block_count  —— 完全对齐
-//	wincount           : Id=Miner、TotalWinCount=win_count 完全对齐；
-//	                     TotalGasReward 在 PG **无来源**（chain.miner_win_counts 只有 3 列，写路径冻结），
-//	                     开这个开关等于让该字段恒为 0。唯一消费点 acl_block_chain.GetBlockDetails
-//	                     用它算 TxFeeReward / MinedReward（assembler_block_chain_info.go:42-58），
-//	                     所以 wincount 开关**默认关闭**，开启前必须先跑 filscan-agg-parity 看差异。
+//	wincount           : Id=Miner、TotalWinCount=win_count、TotalGasReward=gas_reward  —— 完全对齐
+//
+// wincount 的 TotalGasReward（migration/36 起）：
+//
+//	来源是**同一个** /aggregators/wincount 响应里的 TotalGasReward（= Message.Detail.Params.GasReward，
+//	即 RewardActor.AwardBlockReward 隐式消息 params 的 GasReward），同步器已从 36 号迁移起落库
+//	（modules/syncer/chain/reward_task/reward_task.go 的 toMinerWinCount）。
+//
+//	它唯一的消费点是 acl_block_chain.GetBlockDetails（算 TxFeeReward / MinedReward，
+//	assembler_block_chain_info.go:42-58），所以**绝不允许拿 0 顶未回填的行**：
+//	读出来的行里只要还有 gas_reward IS NULL（migration/36 之前写入、回填脚本尚未覆盖的区间），
+//	整个请求回落聚合器（宁慢不空）。判据见 incompleteGasRewardRow / SQLMinerWinCountsRange。
+//	⇒ 未回填区间 = 今天的行为（走聚合器），已回填/新写入区间 = 走 PG。开开关不产生任何口径回归。
 
 // PgRewardOptions 三个端点各自的开关 + PG 读超时。
 type PgRewardOptions struct {
@@ -149,7 +157,12 @@ func (a *pgRewardAgg) MinersBlockReward(ctx context.Context, start chain.Epoch, 
 
 // WinCount 聚合器端点 /aggregators/wincount → chain.miner_win_counts。
 //
-// ⚠ TotalGasReward 无 PG 来源，固定返回 0：见文件头注释与 config.Feature 的说明。
+// 逐字段对齐：Id=Miner（不带前缀形态）、TotalWinCount=win_count、TotalGasReward=gas_reward。
+//
+// 未回填保护：只要本区间里还有 gas_reward IS NULL 的行（migration/36 之前写入、回填未覆盖），
+// 就整请求回落聚合器 —— 因为 TotalGasReward 的消费点 acl_block_chain.GetBlockDetails
+// 拿它算 TxFeeReward / MinedReward（assembler_block_chain_info.go:42-58），
+// 用 0 顶过去等于把区块详情页的两个金额算错。
 func (a *pgRewardAgg) WinCount(ctx context.Context, begin chain.Epoch, end chain.Epoch) ([]*londobell.MinerWinCount, error) {
 	if !a.opt.MinerWinCount {
 		return a.Agg.WinCount(ctx, begin, end)
@@ -161,6 +174,11 @@ func (a *pgRewardAgg) WinCount(ctx context.Context, begin chain.Epoch, end chain
 		log.Warnf("read wincount from pg failed ([%d,%d)): %s; fallback to aggregator", begin.Int64(), end.Int64(), err)
 		return a.Agg.WinCount(ctx, begin, end)
 	}
+	if row := incompleteGasRewardRow(rows); row != nil {
+		log.Warnf("read wincount from pg is incomplete ([%d,%d)): miner=%s has %d/%d rows without gas_reward (backfill pending); fallback to aggregator",
+			begin.Int64(), end.Int64(), row.Miner, row.GasRewardRows, row.TotalRows)
+		return a.Agg.WinCount(ctx, begin, end)
+	}
 	out := make([]*londobell.MinerWinCount, 0, len(rows))
 	for _, row := range rows {
 		out = append(out, &londobell.MinerWinCount{
@@ -168,7 +186,7 @@ func (a *pgRewardAgg) WinCount(ctx context.Context, begin chain.Epoch, end chain
 			// 这里同样给 CrudeAddress()，避免两条路径在 Id 上出现形态差异。
 			Id:             chain.SmartAddress(row.Miner).CrudeAddress(),
 			TotalWinCount:  row.WinCount,
-			TotalGasReward: decimal.Zero,
+			TotalGasReward: gasRewardOf(row),
 		})
 	}
 	if len(out) == 0 {
@@ -178,6 +196,38 @@ func (a *pgRewardAgg) WinCount(ctx context.Context, begin chain.Epoch, end chain
 		return nil, nil
 	}
 	return out, nil
+}
+
+// incompleteGasRewardRow 找出第一条「gas_reward 不完整」的汇总行：
+//
+//	GasReward == nil        —— 该矿工在区间内所有行的 gas_reward 都是 NULL（sum 得 NULL）
+//	GasRewardRows < TotalRows —— 该矿工在区间内部分行还没回填
+//
+// 返回 nil 表示整个区间的 gas_reward 都齐了，PG 结果可以直接用。
+//
+// 为什么是「全区间任一矿工不齐就整请求回落」而不是「只跳过这一行」：
+// 调用方是 GetBlockDetails（一次请求一个高度、一个矿工），跳过会静默给出 0；
+// 而区间内不同矿工混着走两条路径，会让同一份数据的 TxFeeReward 口径在高度之间不一致。
+// 回落的代价只是慢（与开关打开前完全相同），不会错。
+func incompleteGasRewardRow(rows []*bo.AccWinCount) *bo.AccWinCount {
+	for _, row := range rows {
+		if row == nil {
+			continue
+		}
+		if row.GasReward == nil || row.GasRewardRows < row.TotalRows {
+			return row
+		}
+	}
+	return nil
+}
+
+// gasRewardOf 取汇总行的 gas_reward；理论上调用前已由 incompleteGasRewardRow 保证非 NULL，
+// 这里再兜一层是为了「万一将来有人绕过检查直接调」时退化成 0 而不是 panic。
+func gasRewardOf(row *bo.AccWinCount) decimal.Decimal {
+	if row == nil || row.GasReward == nil {
+		return decimal.Zero
+	}
+	return *row.GasReward
 }
 
 // minerEpochRewardsToMinerBlockReward 逐 epoch 行 → 聚合器 miner_blockreward 返回值。

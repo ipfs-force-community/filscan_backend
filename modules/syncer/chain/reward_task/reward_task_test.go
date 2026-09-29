@@ -181,3 +181,32 @@ func TestPrepareOwnerRewardsCompoundsLinearlyAcrossEpochs(t *testing.T) {
 	require.Equal(t, 0, second[0].AccReward.Decimal().Cmp(decimal.NewFromInt(1060)), "1030 + 30（线性，不是 ×2）")
 	require.Equal(t, int64(16), second[0].AccBlockCount, "13 + 3")
 }
+
+// ----- wincount 落库：gas_reward 必须与 win_count 同批落盘 -----
+
+// 聚合器 wincount 的 TotalGasReward 与 TotalWinCount 来自同一次响应，
+// 落库时一个都不能丢：丢 gas_reward 会让 PG 路径的 TxFeeReward / MinedReward 恒为 0
+// （acl_block_chain.GetBlockDetails 的消费点）。
+func TestToMinerWinCountKeepsGasReward(t *testing.T) {
+	row := toMinerWinCount(chain.Epoch(6330000), &londobell.MinerWinCount{
+		Id:             "03645007", // 聚合器 _id 是不带前缀的 0… 形态
+		TotalWinCount:  2,
+		TotalGasReward: decimal.RequireFromString("89145023322864"),
+	})
+
+	require.Equal(t, int64(6330000), row.Epoch)
+	require.Equal(t, "f03645007", row.Miner, "落库统一成带前缀形态")
+	require.Equal(t, int64(2), row.WinCount)
+	require.Equal(t, "89145023322864", row.GasReward.String(), "attoFIL 原样落库，不做单位换算")
+}
+
+// gas_reward 合法为 0 时必须落 0（不是「没值」）：0 与「未回填的 NULL」语义不同，
+// 读路径据此判断能不能走 PG。
+func TestToMinerWinCountKeepsZeroGasReward(t *testing.T) {
+	row := toMinerWinCount(chain.Epoch(6330000), &londobell.MinerWinCount{
+		Id:            "02826815",
+		TotalWinCount: 1,
+	})
+	require.True(t, row.GasReward.IsZero())
+	require.Equal(t, "0", row.GasReward.String())
+}

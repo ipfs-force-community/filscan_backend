@@ -103,11 +103,7 @@ func (m MinerRewardTask) Exec(ctx *syncer.Context) (err error) {
 
 	var minerWinCounts []*po.MinerWinCount
 	for _, v := range winCounts {
-		minerWinCounts = append(minerWinCounts, &po.MinerWinCount{
-			Epoch:    ctx.Epoch().Int64(),
-			Miner:    chain.SmartAddress(v.Id).Address(),
-			WinCount: v.TotalWinCount,
-		})
+		minerWinCounts = append(minerWinCounts, toMinerWinCount(ctx.Epoch(), v))
 	}
 
 	err = m.save(ctx.Context(), minerRewards, ownerRewards, minerWinCounts)
@@ -192,4 +188,23 @@ func (m MinerRewardTask) toMinerRewardEntity(source *londobell.MinersBlockReward
 		BlockCount: source.BlockCount,
 	}
 	return target
+}
+
+// toMinerWinCount 把聚合器 wincount 的一行落成 chain.miner_win_counts 的 PO。
+//
+// TotalWinCount 与 TotalGasReward 来自**同一次** ctx.Agg().WinCount(epoch, epoch+1) 调用
+// （同一个 /aggregators/wincount 响应，管线 londobell-aggregators/pool-monitor/wincount_zl.js）：
+// 补 gas_reward 这一列不需要新增数据源、不需要多发一次聚合器请求，纯粹是把已经在手里的字段落盘。
+// 在此之前该字段被丢弃，导致 PG 侧恒为 0（见 agg_pg_reward.go 的历史注释）。
+//
+// 地址形态：聚合器 _id 是 Message.Detail.Params.Miner（库内为不带前缀的 0… 形态），
+// 落库统一成带前缀的 f0…（与 miner_win_counts 既有行、以及 miner_rewards 的口径一致）。
+// 金额：TotalGasReward 是 decimal128 的 attoFIL，原样落 numeric，不做单位换算。
+func toMinerWinCount(epoch chain.Epoch, source *londobell.MinerWinCount) *po.MinerWinCount {
+	return &po.MinerWinCount{
+		Epoch:     epoch.Int64(),
+		Miner:     chain.SmartAddress(source.Id).Address(),
+		WinCount:  source.TotalWinCount,
+		GasReward: source.TotalGasReward,
+	}
 }
