@@ -55,10 +55,14 @@ build-monitor:
 build-metrics:
 	mkdir -p bin/ && go build --tags=bundle -ldflags "-X main.Version=$(VERSION) -X main.Name=filscan-metrics" -o ./bin/metrics ./cmd/metrics
 
-build: build-syncer build-api build-abi-decoder build-monitor build-metrics
+# 三个统计端点「聚合器 vs PG」两路径一致性校验（切 [feature] 开关前必须跑通）
+build-agg-parity:
+	mkdir -p bin/ && go build --tags=bundle -ldflags "-X main.Version=$(VERSION) -X main.Name=filscan-agg-parity" -o ./bin/agg-parity ./cmd/agg-parity
+
+build: build-syncer build-api build-abi-decoder build-monitor build-metrics build-agg-parity
 .PHONY: build
 
-build-calib: build-calib-syncer build-calib-api build-calib-abi-decoder build-calib-monitor build-calib-metrics
+build-calib: build-calib-syncer build-calib-api build-calib-abi-decoder build-calib-monitor build-calib-metrics build-calib-agg-parity
 .PHONY: build-calib
 
 build-calib-api:
@@ -80,6 +84,9 @@ build-calib-monitor:
 
 build-calib-metrics:
 	mkdir -p bin/ && go build --tags=bundle,calibnet -ldflags "-X main.Version=$(VERSION_CALIB) -X main.Name=filscan-metrics" -o ./bin/metrics ./cmd/metrics
+
+build-calib-agg-parity:
+	mkdir -p bin/ && go build --tags=bundle,calibnet -ldflags "-X main.Version=$(VERSION_CALIB) -X main.Name=filscan-agg-parity" -o ./bin/agg-parity ./cmd/agg-parity
 
 run-api:
 	go run cmd/filscan/filscan.go cmd/filscan/wire_gen.go -c configs/local.toml

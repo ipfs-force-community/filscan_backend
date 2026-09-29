@@ -27,6 +27,83 @@ type Config struct {
 	// Metrics 「同步落后高度 / 关键表新鲜度」指标采集器（filscan-metrics 命令）配置。
 	// 整节可省略：省略时命令使用内置默认值（内置关键表清单 + 127.0.0.1:10020 + 15s）。
 	Metrics *Metrics `toml:"metrics"`
+	// Feature API 读路径特性开关（整节可省略；省略 = 全部关闭 = 与改造前行为 100% 一致）。
+	// 详见 Feature 类型注释与 modules/filscan/biz/browser/agg_pg_reward.go。
+	Feature *Feature `toml:"feature"`
+}
+
+// Feature API 读路径特性开关。
+//
+// 语义：这些开关只控制「对外 API 从哪里读这三类统计量」——关闭（零值/缺省）时一律走
+// londobell 聚合器（改造前的老路径），开启时改读 PG 派生表（同批数据的预计算结果）。
+// 开关关闭时行为与改造前逐字节一致（连一次 SQL 都不会发），因此老配置文件不需要任何改动。
+//
+// 为什么默认关闭：PG 派生表由同步器写入，其覆盖范围/延迟与聚合器不同源；是否切换必须以
+// `filscan-agg-parity` 的两路径一致性校验（同一 miner / 同一高度区间逐字段比对）为准。
+type Feature struct {
+	// MinerBlockRewardReadFromPg 聚合器端点 miner_blockreward（逐 epoch 出块奖励）
+	// 改读 PG 表 chain.miner_rewards。
+	MinerBlockRewardReadFromPg *bool `toml:"miner_blockreward_read_from_pg"`
+	// MinersBlockRewardReadFromPg 聚合器端点 miners_blockreward（逐 epoch 逐矿工）
+	// 改读 PG 表 chain.miner_rewards。
+	MinersBlockRewardReadFromPg *bool `toml:"miners_blockreward_read_from_pg"`
+	// MinerWinCountReadFromPg 聚合器端点 wincount（逐矿工 winCount + gasReward）
+	// 改读 PG 表 chain.miner_win_counts。注意：PG 无 gas_reward 列，开启后
+	// TotalGasReward 恒为 0（详见 agg_pg_reward.go 的说明与 parity 工具的 UNRESOLVED 字段）。
+	MinerWinCountReadFromPg *bool `toml:"miner_wincount_read_from_pg"`
+	// LargeAmountReadFromPg 聚合器端点 transfer_message_for_largeAmount（大额转账列表，FIL>=10000）
+	// 改读 PG 表 chain.large_transfers（migration/35.large_transfers.sql）。
+	// 注意：该端点只吃 index/limit（没有高度区间），TotalCount 是**全表行数**（不去重）；
+	// 同高度内行序线上未定义，PG 侧按 (epoch desc, cid asc) 定序（详见 dal 文件头与
+	// agg_pg_large_amount.go）。开启前必须先跑 `filscan-agg-parity -endpoints large_amount`。
+	LargeAmountReadFromPg *bool `toml:"large_amount_read_from_pg"`
+	// PgReadTimeoutMs 单次 PG 读的超时（毫秒，0 或未配置 = 内置默认 5000ms；<0 = 不设超时）。
+	PgReadTimeoutMs *int64 `toml:"pg_read_timeout_ms"`
+}
+
+// boolValue 解引用布尔指针，nil 一律视为 false（开关默认关闭，老配置不 panic）。
+func boolValue(v *bool) bool {
+	return v != nil && *v
+}
+
+// MinerBlockRewardReadFromPg 是否让 miner_blockreward 走 PG；未配置 = false（走聚合器）。
+func (c *Config) MinerBlockRewardReadFromPg() bool {
+	return c != nil && c.Feature != nil && boolValue(c.Feature.MinerBlockRewardReadFromPg)
+}
+
+// MinersBlockRewardReadFromPg 是否让 miners_blockreward 走 PG；未配置 = false（走聚合器）。
+func (c *Config) MinersBlockRewardReadFromPg() bool {
+	return c != nil && c.Feature != nil && boolValue(c.Feature.MinersBlockRewardReadFromPg)
+}
+
+// MinerWinCountReadFromPg 是否让 wincount 走 PG；未配置 = false（走聚合器）。
+func (c *Config) MinerWinCountReadFromPg() bool {
+	return c != nil && c.Feature != nil && boolValue(c.Feature.MinerWinCountReadFromPg)
+}
+
+// LargeAmountReadFromPg 是否让大额转账列表走 PG；未配置 = false（走聚合器）。
+func (c *Config) LargeAmountReadFromPg() bool {
+	return c != nil && c.Feature != nil && boolValue(c.Feature.LargeAmountReadFromPg)
+}
+
+// PgReadDefaultTimeoutMs PG 读默认超时（毫秒）。未配置时用它。
+const PgReadDefaultTimeoutMs int64 = 5000
+
+// PgReadTimeoutMs 返回配置的 PG 读超时（毫秒）。约定：
+//
+//	未配置 / Feature 缺失 → PgReadDefaultTimeoutMs（内置默认，不会因为漏配而无限等）
+//	配置 0                → 同上（0 视为「用默认」，避免把「漏配」误当「永不超时」）
+//	配置 < 0              → 负数，调用方解释为「不设超时」（显式关闭）
+//	配置 > 0              → 原值
+func (c *Config) PgReadTimeoutMs() int64 {
+	if c == nil || c.Feature == nil || c.Feature.PgReadTimeoutMs == nil {
+		return PgReadDefaultTimeoutMs
+	}
+	v := *c.Feature.PgReadTimeoutMs
+	if v == 0 {
+		return PgReadDefaultTimeoutMs
+	}
+	return v
 }
 
 // Metrics filscan-metrics 的可选配置（全部可省略）。
