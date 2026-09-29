@@ -51,21 +51,48 @@
 -- weight/state_root/receipts/base_fee/min_timestamp/child_epoch 这些列）：
 --   ID   = epoch            ✓（本表）
 --   Cids = keys             ✓（本表；NULL 时等价于聚合器返回空 —— 见 §4）
---   其余 6 列（MinTimestamp/ChildEpoch/State/Receipts/Weight/BaseFee）✗ 无来源
---        唯一沾边的是 chain.base_gas_costs.base_gas（§6），由 trace-task 从
---        /adapter/epoch 的 tipset.BaseFee 写入（modules/syncer/chain/trace-task/trace_task.go:166-168），
---        仅能补 BaseFee 一个标量，且高度与 tipset 文档**错一格**（bell 文档的 BaseFee 取的是 child 的
---        MinTicketBlock().ParentBaseFee，racailum/segment/model/tipset.go:25-30）—— 想用必须先在聚合器
---        可用时用 §6 的对照探针实测确认，别按推断上线。
+--   其余 6 列里：BaseFee 有**旁路来源**（见下），MinTimestamp/ChildEpoch/State/Receipts/Weight
+--   这 5 列**全库无来源**（76 张表逐一核过：没有任何 tipset/block 类表，也没有
+--   weight/state_root/receipts/min_timestamp/child_epoch 这些列）。
+--       唯一沾边的 BaseFee 来源是 chain.base_gas_costs.base_gas（§6），由 trace-task 从
+--        /adapter/epoch 的 tipset.BaseFee 写入（modules/syncer/chain/trace-task/trace_task.go:166-168）。
+--
+-- -----------------------------------------------------------------------------
+-- 现场实测（2026-09-29 23:5x，backend-new01 → 聚合器 172.31.38.30:1237，逐值比对）
+-- -----------------------------------------------------------------------------
+--   ① keys == /aggregators/tipset 的 Cids            4/4 采样相等（含老高度 5,000,000）
+--   ② parent_keys == /aggregators/parent_tipset Cids 6/6 相等（含两个 empty=true 高度）
+--   ③ 行存在且 keys 为空 ⟺ 聚合器 /tipset 返回 data:null（23,828 = 23,828，双向 0 反例）
+--   ④ 聚合器 /tipset 的 BaseFee == chain.base_gas_costs[E+1].base_gas：4/4 相等，且 4/4 ≠ base_gas[E]
+--        例：E=6413031 AGG BaseFee=113159 == base_gas[6413032]=113159（base_gas[E]=100585）
+--            E=6413030 → 100585 == [6413031]；E=6413000 → 102198 == [6413001]；E=5000000 → 100 == [5000001]
+--        ⇒ bell 文档的 BaseFee 取的是 child 的 MinTicketBlock().ParentBaseFee（错一格）——已实测坐实，不是推断。
+--   ⑤ 聚合器文档确实带真值：E=5000000 → MinTimestamp=1748306400、ChildEpoch=5000001、State=<bafy…>、
+--      Receipts=<cid>、Weight=119327157957；近端高度 ChildEpoch=0 / Receipts=""（尚未回填）。
+--   ⑥ 同一晚 23:52 前后该端口曾 connect refused（重启窗口），23:58 恢复 ⇒ 这条读路径的另一半风险
+--      是「聚合器本身会抖」，不是数据一致性。
 --
 -- ⇒ 结论：**不要**做「PG 优先 + 回落」的 Tipset/ParentTipset 装饰器。
---    ParentTipset 若用 PG 拼，会把区块详情页的 parent_weight / state_root 变成 0/空（用户可见的错值）；
---    Tipset 只有 BaseFee 被读，但整结构有 6 列变成零值，属「不保证等价」，会给后来的消费点埋静默零值。
---   真要搬这条读路径，前置条件是**新建一张带上述 8 列的镜像表**（当前 PG 里没有），
---   而不是复用只有 keys/parent_keys 的这张台账。
---    另：本表只覆盖 epoch >= 3,421,974（链前半段整段没有行），且区间内有 3 个洞共 ~7.9 万高度
---    （下 §2/§3 会量出来）⇒ 即便只搬 Cids，也只能是「PG 优先 + 任一缺失/异常回落聚合器」，
+--    ParentTipset 若用 PG 拼，会把区块详情页的 parent_weight / state_root 变成 0/空（api.BlockDetails
+--    的对外字段，用户可见的错值）；Tipset 虽然 API 侧只有 BaseFee 被读、且该值已实测可取，
+--    但整结构仍有 5 列只能给零值 = 「不保证等价」，会给后来的消费点埋静默零值。
+--    另：本表只覆盖 epoch >= 3,421,974（链前半段整段没有行），且区间内只有 3 个洞共 ~7.9 万高度
+--    （§2/§3 会量出来）⇒ 即便只搬 Cids，也只能是「PG 优先 + 任一缺失/异常回落聚合器」，
 --    且回落判据必须区分「行不存在（PG 缺口）」与「行存在但 keys 为空（链上真空高度，聚合器同样返回空）」。
+--
+-- -----------------------------------------------------------------------------
+-- 可行的三条后续（都没做，按等价性×成本排序）
+-- -----------------------------------------------------------------------------
+--   A. 只搬 BaseFee（等价性已实测）：把「只读 BaseFee」的调用点改读 chain.base_gas_costs
+--        · modules/filscan/acl/acl_block_chain.go:583-590  Tipset(message.Epoch-1) → base_gas[message.Epoch]
+--        · modules/filscan/biz/browser/biz_output_imtoken.go:82 / :167  ParentTipset(x) → base_gas[doc_epoch+1]
+--      代价：是标量读、天然可回落；但要处理「doc_epoch 未知」（x-1 为空时文档在更早高度，
+--      由「< x 的最大非空 keys 高度」推出，并用「该区间 PG 无缺行」当可服务的判据）。
+--   B. 只搬 Cids（对「只读 Cids 的消费者」等价）：现在只有同步器那两处（modules/syncer/syncer.go:891-950）
+--      只吃 Cids，但那是写方读自己写的行（环形），叠加 97.4% 覆盖 ⇒ 收益/风险都不划算。
+--   C. 真搬家：新建一张 8 列镜像表（epoch + cids[] + min_timestamp + child_epoch + state + receipts +
+--      weight + base_fee，当前 PG 没有此表）。cids 可从本表回填、base_fee 可从 base_gas_costs 回填（A 的关系），
+--      其余 4 列必须从聚合器/lotus 取 ⇒ 成本最大，但只有它能让 Tipset/ParentTipset 真正切读。
 --
 -- =============================================================================
 
