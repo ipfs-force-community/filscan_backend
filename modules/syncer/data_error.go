@@ -52,8 +52,14 @@ const (
 
 	// defaultStateGapJumpMinGap 触发「一次跳过整段不可恢复区间」的最小缺口（链头 − 当前高度）：
 	// 缺口小于它说明只是零星坏高度，按原逻辑重试/单高度跳过即可，不做区间跳。
-	// 配置项：syncer.state_gap_jump_min_gap
-	defaultStateGapJumpMinGap int64 = 1000
+	//
+	// 2026-09-29 由 1000 抬高到 5000。原因（主网实测）：miner / pro / sector 这类任务必须等
+	// 「链头 − 约 1000」（EC finality）才写数据，正常运行时它们本来就停在链头下方约 1000 处；
+	// 阈值 1000 与这个正常落差贴死 ⇒ 一旦短暂卡顿就越过门槛，把「本可恢复」的区间误判为
+	// 「不可恢复」并一次性跳过。实测：sector-task 于 09-24 09:24 在链头 −1046 处误跳，
+	// 留出 1045 高度的台账空洞。抬高后判定整段不可恢复要多等一会儿，代价只是延迟，不会丢数据。
+	// 配置项：syncer.state_gap_jump_min_gap（生产可在 config.toml 覆盖本默认值）
+	defaultStateGapJumpMinGap int64 = 5000
 
 	// defaultStateGapJumpMargin 区间跳的目标高度 = 链头 − margin（留出安全边界，避免贴着链头被回滚）。
 	// 配置项：syncer.state_gap_jump_margin
