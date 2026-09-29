@@ -196,8 +196,11 @@ func (m RewardTaskDal) GetRewardMiners(ctx context.Context, epochs chain.LCRCRan
 	if err != nil {
 		return
 	}
+	// LCRCRange 是**左闭右闭**区间（pkg/chain/epoch.go:143，syncer/context.go:37 批量同步区间），
+	// 调用方传进来的 LteEnd 就是本批要覆盖的最后一个高度，右端必须用 <= ；
+	// 原来的 `< ?` 会漏掉每批区间最后一个高度爆块的矿工，导致这批矿工的累计统计漏更新。
 	err = tx.Raw(`
-		select distinct miner from chain.miner_rewards where epoch >= ? and epoch < ?`,
+		select distinct miner from chain.miner_rewards where epoch >= ? and epoch <= ?`,
 		epochs.GteBegin.Int64(),
 		epochs.LteEnd.Int64(),
 	).Scan(&miners).Error
