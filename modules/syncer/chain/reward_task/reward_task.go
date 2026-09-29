@@ -141,31 +141,40 @@ func (m MinerRewardTask) prepareOwnerRewards(ctx *syncer.Context, minerRewards [
 		if err != nil {
 			return
 		}
-		if _, ok := rewardsMap[ownerAddr.Address()]; !ok {
-			rewardsMap[ownerAddr.Address()] = &owner.Reward{
+
+		r, exist := rewardsMap[ownerAddr.Address()]
+		if !exist {
+			r = &owner.Reward{
 				Epoch:        ctx.Epoch(),
 				Owner:        ownerAddr,
 				SyncMinerRef: ctx.Epoch(),
 				PrevEpochRef: ctx.Epoch(),
 			}
+
+			// 上一条 owner_rewards 的累计基准**每个 owner 只能取一次**：
+			// 本循环是按矿工遍历的，同一 owner 在本高度可能有 N 个爆块矿工，
+			// 若把「取上一条并累加 acc」写在循环体内，上一条 acc_reward /
+			// acc_block_count 会被重复累加 N 次 ⇒ 每次调用把累计值放大 N 倍
+			// （连续高度上呈指数级放大，且 acc_block_count 会 int64 溢出为负数）。
+			var last *owner.Reward
+			last, err = m.repo.GetLastOwnerRewardOrNil(ctx.Context(), ctx.Epoch(), ownerAddr)
+			if err != nil {
+				return
+			}
+			if last != nil {
+				r.AccReward = last.AccReward
+				r.AccBlockCount = last.AccBlockCount
+				r.PrevEpochRef = last.Epoch
+			}
+
+			rewardsMap[ownerAddr.Address()] = r
 		}
 
-		rewardsMap[ownerAddr.Address()].Reward = chain.AttoFil(rewardsMap[ownerAddr.Address()].Reward.Decimal().Add(v.Reward.Decimal()))
-		rewardsMap[ownerAddr.Address()].BlockCount = rewardsMap[ownerAddr.Address()].BlockCount + v.BlockCount
-		rewardsMap[ownerAddr.Address()].AccReward = chain.AttoFil(rewardsMap[ownerAddr.Address()].AccReward.Decimal().Add(v.Reward.Decimal()))
-		rewardsMap[ownerAddr.Address()].AccBlockCount = rewardsMap[ownerAddr.Address()].AccBlockCount + v.BlockCount
-		rewardsMap[ownerAddr.Address()].Miners = append(rewardsMap[ownerAddr.Address()].Miners, v.Miner)
-
-		var last *owner.Reward
-		last, err = m.repo.GetLastOwnerRewardOrNil(ctx.Context(), ctx.Epoch(), ownerAddr)
-		if err != nil {
-			return
-		}
-		if last != nil {
-			rewardsMap[ownerAddr.Address()].AccReward = chain.AttoFil(rewardsMap[ownerAddr.Address()].AccReward.Decimal().Add(last.AccReward.Decimal()))
-			rewardsMap[ownerAddr.Address()].AccBlockCount = rewardsMap[ownerAddr.Address()].AccBlockCount + last.AccBlockCount
-			rewardsMap[ownerAddr.Address()].PrevEpochRef = last.Epoch
-		}
+		r.Reward = chain.AttoFil(r.Reward.Decimal().Add(v.Reward.Decimal()))
+		r.BlockCount = r.BlockCount + v.BlockCount
+		r.AccReward = chain.AttoFil(r.AccReward.Decimal().Add(v.Reward.Decimal()))
+		r.AccBlockCount = r.AccBlockCount + v.BlockCount
+		r.Miners = append(r.Miners, v.Miner)
 	}
 
 	for _, v := range rewardsMap {
