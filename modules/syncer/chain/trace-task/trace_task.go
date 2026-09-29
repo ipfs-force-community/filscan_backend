@@ -18,10 +18,22 @@ import (
 )
 
 func NewTraceTask(db *gorm.DB, adapter londobell.Adapter) *Trace {
-	return &Trace{
-		repo:                   dal.NewSyncerTraceTaskDal(db),
-		MinerGasCostCalculator: NewMinerGasCostCalculator(typer.NewTyper(dal.NewChangeActorTaskDal(db), adapter)),
+	return NewTraceTaskWithRepo(
+		dal.NewSyncerTraceTaskDal(db),
+		NewMinerGasCostCalculator(typer.NewTyper(dal.NewChangeActorTaskDal(db), adapter)),
+	)
+}
+
+// NewTraceTaskWithRepo 与 NewTraceTask 完全同构，只是把仓储与 MinerGas 计算器交给调用方注入。
+//
+// 存在的理由（别删）：离线回放子命令的单测要断言「写入了哪些派生表、写在哪张表上、--no-write 下
+// 一次都没转发」，而 Trace.repo 是包内私有字段 —— 没有这条入口就只能拿真库跑，那不是单测。
+// 生产路径始终走 NewTraceTask；本条入口不改变任何生产行为。
+func NewTraceTaskWithRepo(repo repository.SyncerTraceTaskRepo, calc *MinerGasCostCalculator) *Trace {
+	if repo == nil {
+		panic("trace_task: NewTraceTaskWithRepo 需要非 nil 的仓储（读写都走它）")
 	}
+	return &Trace{repo: repo, MinerGasCostCalculator: calc}
 }
 
 var _ syncer.Task = (*Trace)(nil)
