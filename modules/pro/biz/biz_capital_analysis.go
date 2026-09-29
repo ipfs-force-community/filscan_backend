@@ -329,7 +329,9 @@ func (c *CapitalAnalysisBiz) CapitalAddrTransaction(ctx context.Context, req pro
 		if strings.Contains(err.Error(), "actor not found") {
 			return resp, mix.Warnf("the address you entered not found")
 		}
-		return resp, mix.Warnf(err.Error())
+		// 参数化占位符：err.Error() 是动态串，直接当 format 用会在含 % 时被 vet 拦下（printf 检查），
+		// 也会让 mix.Warnf 按格式串解析（本行与缺陷修复无关，仅修既有 vet 报错，使本包能跑 go test）
+		return resp, mix.Warnf("%s", err.Error())
 	}
 	resp.Balance = balance
 	resp.Proportion = proportion
