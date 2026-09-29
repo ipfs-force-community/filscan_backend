@@ -321,17 +321,33 @@ func (m MinerBiz) RewardDetail(ctx context.Context, req pro.RewardDetailRequest)
 	if err != nil {
 		return
 	}
-	all := &pro.RewardDetail{
+	var all *pro.RewardDetail
+	response.RewardDetailList, all = buildRewardDetails(minerIDList, minersReward, minerInfo)
+	collection.Sort[*pro.RewardDetail](response.RewardDetailList, func(a, b *pro.RewardDetail) bool {
+		return a.MinerId < b.MinerId
+	})
+
+	if req.MinerID != nil {
+		response.RewardDetailList = append([]*pro.RewardDetail{all}, response.RewardDetailList...)
+	}
+	response.Epoch = updated
+	response.EpochTime = updated.Time()
+	return
+}
+
+// buildRewardDetails 把 merger 的「逐日 × 逐矿工」统计摊平成接口明细行，并汇总出「All」行。
+// 抽成函数是为了让「All 行逐列累加」这条口径能被单测覆盖（见 biz_miner_test.go）。
+func buildRewardDetails(minerIDList []chain.SmartAddress, minersReward []*merger.DayRewardStat,
+	minerInfo map[chain.SmartAddress]probo.UserMiner) (list []*pro.RewardDetail, all *pro.RewardDetail) {
+
+	all = &pro.RewardDetail{
 		Date: "All",
 	}
 	for _, minerID := range minerIDList {
 		for _, reward := range minersReward {
 			all.MinerId = minerID
-			all.BlockCount += reward.Stats[minerID].Blocks
-			all.WinCount += reward.Stats[minerID].WinCounts
-			all.BlockReward = reward.Stats[minerID].Rewards.Decimal().Add(all.BlockReward)
-			all.TotalReward = reward.Stats[minerID].TotalRewards.Decimal().Add(all.BlockReward)
-			response.RewardDetailList = append(response.RewardDetailList, &pro.RewardDetail{
+			accumulateAllReward(all, reward.Stats[minerID])
+			list = append(list, &pro.RewardDetail{
 				Date:        reward.Day.Time().String(),
 				Tag:         minerInfo[minerID].MinerTag,
 				MinerId:     minerID,
@@ -344,16 +360,28 @@ func (m MinerBiz) RewardDetail(ctx context.Context, req pro.RewardDetailRequest)
 			})
 		}
 	}
-	collection.Sort[*pro.RewardDetail](response.RewardDetailList, func(a, b *pro.RewardDetail) bool {
-		return a.MinerId < b.MinerId
-	})
 
-	if req.MinerID != nil {
-		response.RewardDetailList = append([]*pro.RewardDetail{all}, response.RewardDetailList...)
-	}
-	response.Epoch = updated
-	response.EpochTime = updated.Time()
 	return
+}
+
+// accumulateAllReward 把「某矿工某一天」的统计累加进「All」汇总行：四列各自求和，
+// 与页面各列口径一致（block_count / win_count / block_reward / total_reward）。
+//
+// 缺陷修复（2026-09-29）：原实现写的是
+//
+//	all.TotalReward = day.TotalRewards.Add(all.BlockReward)
+//
+// 即把「出块奖励的累计值」加到当日的 total_reward 上 ⇒ All 行的 total_reward 退化成
+// 「出块奖励的运行和」（生产上 total_reward 恒 0 时，它恰好等于 All 行的 block_reward）。
+// 累计对象只能是 all.TotalReward 自己。
+//
+// 口径提醒：本行的 total_reward 是「逐日列」（取自矿工累计出块奖励的快照，见 dal_reward.go），
+// 因此 All 行对它是「按天求和」；若产品要的是「区间末累计」，则需要另外定义这一列（见交付说明）。
+func accumulateAllReward(all *pro.RewardDetail, stat *merger.RewardStat) {
+	all.BlockCount += stat.Blocks
+	all.WinCount += stat.WinCounts
+	all.BlockReward = stat.Rewards.Decimal().Add(all.BlockReward)
+	all.TotalReward = stat.TotalRewards.Decimal().Add(all.TotalReward)
 }
 
 func (m MinerBiz) LuckyRateDetail(ctx context.Context, req pro.LuckyRateDetailRequest) (response pro.LuckyRateDetailResponse, err error) {
