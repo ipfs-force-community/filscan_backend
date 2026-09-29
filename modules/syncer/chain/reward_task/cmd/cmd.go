@@ -56,11 +56,14 @@
 // chain.miner_reward_stats（calc-miner-acc-reward-task 读 SumRewards）、
 // chain.miner_agg_rewards（calc-miner-agg-reward）。⇒ 本命令必须排在它们**之前**。
 //
-// 已知偏差（既有实现，本命令**忠实复现**、不做修正 —— 改它等于改生产 chain 同步器的口径，
-// 需要业务先点头）：chain/reward_task/reward_task.go:159-168 把「上一条 owner_rewards」
-// 加在**每个爆块矿工**的循环里，于是同一高度同一 owner 下有 N 个爆块矿工时，上一条会被累加 N 次
-// ⇒ chain.owner_rewards 的 acc_reward / acc_block_count **偏高**（本高度的 reward / block_count 是对的）。
-// 回补空洞时这个偏差会同样成立：想拿到「准的累计值」必须先修 reward_task，而不是靠回放。
+// 已修复的既有偏差（本分支 fix/reward-acc-and-miner-pool）：历史上
+// chain/reward_task/reward_task.go 把「上一条 owner_rewards」加在**每个爆块矿工**的循环里，
+// 于是同一高度同一 owner 下有 N 个爆块矿工时，上一条会被累加 N 次 ⇒ chain.owner_rewards 的
+// acc_reward / acc_block_count 被逐高度放大 N 倍（本高度的 reward / block_count 一直是对的）。
+// 生产后果：acc_reward 已到 10^1500 量级、acc_block_count 已 int64 溢出为负数。
+// 修复后「取上一条 + 累加 acc」每个 owner 只做一次（acc_* = 本高度该 owner 的合计 + 上一条），
+// 但**已被写脏的历史行不会自动收敛**：需要按高度（从某个干净基准起、升序）重算 owner_rewards.acc_*。
+// 回补空洞时必须用修复后的口径，否则补出来的累计值仍然偏高。
 package minerrewardscmd
 
 import (

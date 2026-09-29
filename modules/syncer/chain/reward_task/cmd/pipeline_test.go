@@ -251,11 +251,11 @@ func TestMinerRewardsAccumulatesFromPreviousOwnerReward(t *testing.T) {
 	require.Equal(t, 0, rp2.inner.ownerRewards[0][0].AccReward.Decimal().Cmp(decimal.NewFromInt(100)))
 }
 
-// 生产实现的一个既有偏差（本命令**忠实复现**、未修改；见包注释「已知偏差」）：
-// reward_task.go:159-168 把「上一条 owner_rewards」加在**每个爆块矿工**的循环里，
-// 于是同一高度同一 owner 下有 N 个爆块矿工时，上一条会被累加 N 次 ⇒ acc_reward / acc_block_count 偏高。
-// 这里钉住现状，避免「以为补出来的累计值是准的」。
-func TestMinerRewardsPreviousRowIsAddedOncePerMiner(t *testing.T) {
+// 回归测试（修复前是「已知偏差」，见包注释）：上一条 owner_rewards 只能加**一次**，
+// 与同一高度该 owner 下有几个爆块矿工无关 —— 两个矿工同属 t0200 时：
+// acc_reward = 300（本高度）+ 1000（上一条）＝ 1300（不是 300 + 1000×2），
+// acc_block_count = 5 + 8 = 13（不是 5 + 8×2）。
+func TestMinerRewardsPreviousRowIsAddedOncePerOwner(t *testing.T) {
 	rp := buildRewardReplay(t, false, replayA) // 两个矿工同属 t0200
 	rp.inner.lastOwnerReward = newOwnerReward(replayA-120, 1000, 8)
 	rp.execute(t, offlinereplay.RunOptions{})
@@ -263,9 +263,11 @@ func TestMinerRewardsPreviousRowIsAddedOncePerMiner(t *testing.T) {
 	got := rp.inner.ownerRewards[0][0]
 	require.Equal(t, 0, got.Reward.Decimal().Cmp(decimal.NewFromInt(300)), "本高度奖励本身是对的")
 	require.Equal(t, int64(5), got.BlockCount, "本高度爆块数本身是对的")
-	require.Equal(t, 0, got.AccReward.Decimal().Cmp(decimal.NewFromInt(2300)),
-		"现状：300 + 上一条 1000 × 2 个矿工（偏高，属既有实现偏差，不在本命令范围内）")
-	require.Equal(t, int64(21), got.AccBlockCount, "现状：5 + 8 × 2")
+	require.Equal(t, 0, got.AccReward.Decimal().Cmp(decimal.NewFromInt(1300)),
+		"acc_reward = 300 + 上一条 1000（只加一次，不能按矿工数 ×2）")
+	require.Equal(t, int64(13), got.AccBlockCount, "acc_block_count = 5 + 8（只加一次）")
+	require.Equal(t, int64(replayA-120), got.PrevEpochRef.Int64(), "prev_epoch_ref 指向上一条")
+	require.Len(t, got.Miners, 2, "同一 owner 下的两个矿工都记在 miners 里")
 }
 
 // 高于链头的高度在开跑前被拦下（清单模式不会去等未来高度，避免整批卡死）
