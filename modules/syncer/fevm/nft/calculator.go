@@ -125,13 +125,9 @@ func (e NFTCalculator) Calc(ctx *syncer.Context) (err error) {
 	
 	var tokens []*po.NFTToken
 	
-	for _, v := range filter {
-		var token *po.NFTToken
-		token, err = prepareErc721Token(e.decoder, e.abi, v.Contract, v.TokenId)
-		if err != nil {
-			return
-		}
-		tokens = append(tokens, token)
+	tokens, err = e.prepareTokens(filter)
+	if err != nil {
+		return
 	}
 	
 	var contracts []*po.NFTContract
@@ -153,6 +149,31 @@ func (e NFTCalculator) Calc(ctx *syncer.Context) (err error) {
 		ResolveNFTURL(ctx.Context(), true, e.urlDal, v.Contract, v.TokenId, v.Item, v.TokenUri, "")
 	}
 	
+	return
+}
+
+// prepareTokens 为一批转账事件准备待落库的 NFT token 记录。
+//
+// 抽出来只为可测（循环体与原来逐字一致，只多了一段 nil 判断）：原实现把
+// prepareErc721Token 的返回值直接 append，而该函数对「不是可解析 ERC721 的合约」
+// 会返回 (nil, nil)（见 task.go collectTransfers 的跳过语义）——nil 一旦进了 tokens，
+// 后面的 SaveTokens（逐字段解引用）与 ResolveNFTURL 都会 nil 解引用 panic，
+// 让该高度计算任务失败并被框架无限重试、卡死。RollBack 里一直有同样的 nil 判断，
+// Calc 这条路径漏了。跳过是正确的，但要留一条 Warn 便于事后核对丢了哪些 token。
+func (e NFTCalculator) prepareTokens(filter map[string]*po.NFTTransfer) (tokens []*po.NFTToken, err error) {
+	for _, v := range filter {
+		var token *po.NFTToken
+		token, err = prepareErc721Token(e.decoder, e.abi, v.Contract, v.TokenId)
+		if err != nil {
+			return
+		}
+		if token == nil {
+			log.Warnf("epoch %d 跳过 NFT token 落库：合约取不到 ERC721 元数据（token 准备为空，非可解析 ERC721）: contract=%s token_id=%s cid=%s",
+				v.Epoch, v.Contract, v.TokenId, v.Cid)
+			continue
+		}
+		tokens = append(tokens, token)
+	}
 	return
 }
 

@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/gozelle/async/parallel"
+	"github.com/gozelle/mix"
 	"gitlab.forceup.in/fil-data-factory/filscan-backend/pkg/londobell"
 
 	"gitlab.forceup.in/fil-data-factory/filscan-backend/modules/common/infra/po"
@@ -93,6 +94,20 @@ func (c CalcChangeActorTask) Calc(ctx *syncer.Context) (err error) {
 	}
 	// 准备 actors
 	if len(balances) == 0 {
+		// 该高度的 actor 余额（chain.actor_balances）还没落库，本高度无从计算变动 Actor。
+		//
+		// 旧实现在这里直接 `return nil`：无错误、无日志。而框架只把 **err == nil** 当成执行成功 ——
+		// execTaskOrCalculator 会随之写 chain.sync_task_epochs（cost 为本次耗时，实测 0），
+		// 于是该高度被记成「已执行」，后续每轮都在 GetSyncTaskEpochOrNil 处直接跳过，
+		// **永不再重算** —— chain.actor_actions 就此静默漏数（实测 [6280000,6412000] 内漏 1333 个高度）。
+		//
+		// 现在返回**可重试**的软错误（*mix.Warn）：
+		//   - 框架按 *mix.Warn 分支以 Warn 级别记录该高度与原因（ctx.Warnf），不会静默；
+		//   - 不写 chain.sync_task_epochs ⇒ 下一轮该高度会被重新计算；
+		//   - syncer.ClassifySyncError 判为 ErrorKindNotReady（未就绪），**不计入也不清零**
+		//     「连续 N 次失败即跳过」那两条防线 ⇒ 不改变本轮刚上线的跳过逻辑语义。
+		err = mix.Warnf("高度 %s 的 actor 余额(chain.actor_balances)尚未落库（该高度查不到任何余额行），"+
+			"本次不计算变动 Actor（chain.actor_actions），按未就绪处理、下一轮重算", ctx.Epoch())
 		return
 	}
 	tBalances := time.Since(tStart)
