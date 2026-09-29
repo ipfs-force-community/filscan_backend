@@ -13,6 +13,7 @@ import (
 	propo "gitlab.forceup.in/fil-data-factory/filscan-backend/modules/pro/infra/po"
 	"gitlab.forceup.in/fil-data-factory/filscan-backend/modules/syncer"
 	"gitlab.forceup.in/fil-data-factory/filscan-backend/pkg/chain"
+	"gitlab.forceup.in/fil-data-factory/filscan-backend/pkg/chain/upgrader/message_detail"
 	"gitlab.forceup.in/fil-data-factory/filscan-backend/pkg/londobell"
 	"gitlab.forceup.in/fil-data-factory/filscan-backend/utils/_dal"
 	"gorm.io/gorm"
@@ -136,13 +137,18 @@ func (s SectorTask) syncMinerInfosSectors(ctx *syncer.Context, info *londobell.M
 	var totalRawBytePower decimal.Decimal
 	var totalPledge decimal.Decimal
 
+	// NV29（Solstice / FIP-0118）之后链上换用 v19 的扇区算力口径：带 FULL_QA_POWER 标志的
+	// 扇区恒为 10x，且 QA 周期起点从 Activation 变成 PowerBaseEpoch。历史数据不重算，
+	// 只有 epoch >= UpgradeSolsticeHeight 才走新口径。
+	nv29 := ctx.Epoch() >= message_detail.UpgradeSolsticeHeight
+
 	var sectors []*propo.MinerSector
 
 	sectorsMap := map[int64]*propo.MinerSector{}
 	sectorSize := decimal.NewFromInt(info.SectorSize)
 	for _, v := range r.SectorExpirations {
 		hour := v.Expiration / 120 * 120
-		vv := s.prepareSector(hour, v, sectorSize)
+		vv := s.prepareSector(hour, v, sectorSize, nv29)
 		if _, ok := sectorsMap[hour]; !ok {
 			item := &propo.MinerSector{
 				Epoch:     ctx.Epoch().Int64(),
@@ -168,24 +174,30 @@ func (s SectorTask) syncMinerInfosSectors(ctx *syncer.Context, info *londobell.M
 		totalRawBytePower = totalRawBytePower.Add(v.Power)
 	}
 
-	if !info.RawBytePower.Equal(totalRawBytePower) {
-		err = fmt.Errorf("raw power not equal: %s != %s", info.RawBytePower, totalRawBytePower)
-		return
+	// 三桶按占比切分，和恒等于自算的 QA 总量。
+	totalQA := totalVDC.Add(totalDC).Add(totalCC)
+
+	// 对账：只告警、不中断高度。
+	//
+	// 老代码是拿 londobell 用同一个（错的）v11 公式算出来的 VDC/DC/CC 跟本地求和互比，
+	// 两边同错所以恒等成立、永远查不出问题；这里换成与链上真值对账：
+	//   1. 自算 QA 总量（扇区求和） vs 链上 info.QualityAdjPower；
+	//   2. 自算原始算力 vs 链上 info.RawBytePower；
+	//   3. londobell 返回的三桶 vs 本地三桶（用于发现两侧口径版本不一致）。
+	// 校验失败不再 return err：口径/数据质量差异不该把整个高度打成失败重试。
+	if !powerNearEqual(totalQA, info.QualityAdjPower) {
+		ctx.Warnf("miner %s epoch %s QA 总量与链上不一致: 扇区求和=%s 链上 QualityAdjPower=%s diff=%s nv29=%v",
+			info.Miner.Address(), ctx.Epoch(), totalQA, info.QualityAdjPower, totalQA.Sub(info.QualityAdjPower), nv29)
 	}
 
-	if !r.VDCPower.Equal(totalVDC) {
-		err = fmt.Errorf("vdc not equal: %s != %s", r.VDCPower, totalVDC)
-		return
+	if !powerNearEqual(totalRawBytePower, info.RawBytePower) {
+		ctx.Warnf("miner %s epoch %s 原始算力与链上不一致: 扇区求和=%s 链上 RawBytePower=%s",
+			info.Miner.Address(), ctx.Epoch(), totalRawBytePower, info.RawBytePower)
 	}
 
-	if !r.DCPower.Equal(totalDC) {
-		err = fmt.Errorf("dc not equal: %s != %s", r.DCPower, totalDC)
-		return
-	}
-
-	if !r.CCPower.Equal(totalCC) {
-		err = fmt.Errorf("cc not equal: %s != %s", r.CCPower, totalCC)
-		return
+	if !powerNearEqual(r.VDCPower, totalVDC) || !powerNearEqual(r.DCPower, totalDC) || !powerNearEqual(r.CCPower, totalCC) {
+		ctx.Warnf("miner %s epoch %s londobell 三桶与本地口径不一致: londobell(vdc=%s dc=%s cc=%s) 本地(vdc=%s dc=%s cc=%s)",
+			info.Miner.Address(), ctx.Epoch(), r.VDCPower, r.DCPower, r.CCPower, totalVDC, totalDC, totalCC)
 	}
 
 	dc := &propo.MinerDc{
@@ -198,9 +210,10 @@ func (s SectorTask) syncMinerInfosSectors(ctx *syncer.Context, info *londobell.M
 		ActiveSectors:   info.ActiveSectorCount,
 		FaultSectors:    info.FaultSectorCount,
 		SectorSize:      info.SectorSize,
-		VdcPower:        r.VDCPower,
-		DcPower:         r.DCPower,
-		CCPower:         r.CCPower,
+		// 落库用本地按统一口径（QASplit）自己算出来的三桶，不依赖对端 londobell 的版本。
+		VdcPower: totalVDC,
+		DcPower:  totalDC,
+		CCPower:  totalCC,
 	}
 
 	if !s.store {
@@ -245,7 +258,21 @@ func (s SectorTask) save(dc *propo.MinerDc, sectors []*propo.MinerSector) (err e
 	return
 }
 
-func (s SectorTask) prepareSector(hour int64, v *londobell.MinerSector, size decimal.Decimal) (item *propo.MinerSector) {
+// powerNearEqual 比较两个算力值是否「一致」，允许 1ppm 的相对误差：
+// decimal 除法在 16 位有效数字处截断，逐扇区按占比切分再求和的场景下会有极小的舍入漂移。
+func powerNearEqual(a, b decimal.Decimal) bool {
+	if a.Equal(b) {
+		return true
+	}
+	diff := a.Sub(b).Abs()
+	max := a.Abs()
+	if b.Abs().GreaterThan(max) {
+		max = b.Abs()
+	}
+	return diff.Mul(decimal.NewFromInt(1_000_000)).LessThanOrEqual(max)
+}
+
+func (s SectorTask) prepareSector(hour int64, v *londobell.MinerSector, size decimal.Decimal, nv29 bool) (item *propo.MinerSector) {
 
 	item = &propo.MinerSector{
 		Epoch:     0,
@@ -259,6 +286,29 @@ func (s SectorTask) prepareSector(hour int64, v *londobell.MinerSector, size dec
 		Cc:        decimal.Decimal{},
 	}
 
+	if nv29 {
+		// NV29（Solstice / FIP-0118，calibnet 4109133）之后的 v19 口径：
+		//   - 带 FULL_QA_POWER(1<<1) 标志的扇区恒为 10x（新扇区、method 37 升级的老扇区）；
+		//   - QA 周期起点是 PowerBaseEpoch 而不是 Activation（续期扇区两者不同）；
+		//   - vdw 的语义变成「piece 的总时空」，dw 在新扇区恒为 0；
+		//   - FIP-0118 之后没有 verified deal，满 QA 扇区整块算力归容量算力。
+		// 实现见 pkg/londobell/qa_split.go（与 londobell 侧 adapter/qa_split.go 同源）。
+		_, vdc, dc, cc, _ := londobell.QASplit(
+			uint64(size.IntPart()),
+			v.Flags,
+			v.PowerBaseEpoch,
+			v.Activation,
+			v.Expiration,
+			v.DealWeight.BigInt(),
+			v.VerifiedDealWeight.BigInt(),
+		)
+		item.Vdc = decimal.NewFromBigInt(vdc, 0)
+		item.Dc = decimal.NewFromBigInt(dc, 0)
+		item.Cc = decimal.NewFromBigInt(cc, 0)
+		return
+	}
+
+	// epoch < UpgradeSolsticeHeight 的历史数据保持 v11 老口径不动（不回溯重算）。
 	//quality := ((size*duration-(dealweight+verifiedweight)*10 + dealweight*10 + verifiedweight*100 ) << 20 ) / size*duration / 10
 	//adjpower := quality * size >> 20
 

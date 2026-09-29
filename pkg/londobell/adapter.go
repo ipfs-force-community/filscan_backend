@@ -80,6 +80,16 @@ type RewardActorState struct {
 	TotalStoragePowerReward decimal.Decimal
 	SimpleTotal             decimal.Decimal
 	BaselineTotal           decimal.Decimal
+	// NV29(Solstice) 起：TotalStoragePowerReward 改名为 TotalMintedReward（全部铸造量），
+	// 另新增销毁与显式流的累计量；SimpleTotal/BaselineTotal 已从状态移到代码常量。
+	TotalMintedReward   decimal.Decimal
+	TotalBurnMinted     decimal.Decimal
+	TotalExplicitMinted decimal.Decimal
+}
+
+// MinerMinted 返回「发给出块者的奖励」，即 filscan 的「出块奖励」口径（NV29 前后统一）。
+func (r RewardActorState) MinerMinted() decimal.Decimal {
+	return minerMinted(r.TotalStoragePowerReward, r.TotalMintedReward, r.TotalBurnMinted, r.TotalExplicitMinted)
 }
 
 type PowerActorState struct {
@@ -247,10 +257,21 @@ type ActiveSectorsReply struct {
 	CCPower           decimal.Decimal `json:"CCPower"`
 }
 
+// MinerSector 是 londobell /adapter/active_sectors 返回的单个扇区。
+//
+// Flags / PowerBaseEpoch / FullQaPower 是 NV29（Solstice / FIP-0118）之后新增的加性字段：
+// 老字段（Expiration/Activation/DealWeight/VerifiedDealWeight/InitialPledge）语义不变，
+// 老的 londobell 版本不返回新字段时它们为零值（QASplit 会退回 v19 口径，full 走 VDW 判定）。
 type MinerSector struct {
 	Expiration         int64           `json:"Expiration"`
 	Activation         int64           `json:"Activation"`
 	DealWeight         decimal.Decimal `json:"DealWeight"`
 	VerifiedDealWeight decimal.Decimal `json:"VerifiedDealWeight"`
 	InitialPledge      decimal.Decimal `json:"InitialPledge"`
+	// Flags 是链上 SectorOnChainInfo.Flags（1<<0 SIMPLE_QA_POWER，1<<1 FULL_QA_POWER）。
+	Flags uint64 `json:"Flags"`
+	// PowerBaseEpoch 是 v19 起 QA 周期的起点（续期过的扇区大于 Activation）。
+	PowerBaseEpoch int64 `json:"PowerBaseEpoch"`
+	// FullQaPower 是 londobell 按 lotus miner.SectorIsFullQaPower 判定的「满 QA（10x）」。
+	FullQaPower bool `json:"FullQaPower"`
 }

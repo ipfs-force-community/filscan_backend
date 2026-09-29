@@ -363,6 +363,31 @@ type RewardActorDetail struct {
 	ThisEpochReward         decimal.Decimal   `json:"ThisEpochReward"`
 	ThisEpochRewardSmoothed ThisEpochSmoothed `json:"ThisEpochRewardSmoothed"`
 	TotalStoragePowerReward decimal.Decimal   `json:"TotalStoragePowerReward"`
+	// NV29(Solstice) 起，TotalStoragePowerReward 改名为 TotalMintedReward，且语义变为「f02 全部铸造量 = 销毁 + 显式流 + 矿工份额」。
+	// 见 go-state-types v19/reward/reward_state.go「Minted totals: total = burn + explicit + the miners' share」，
+	// 以及 lotus v1.37.0-rc1 chain/actors/builtin/reward/streams.go 的 MinerMinted()。
+	TotalMintedReward   decimal.Decimal `json:"TotalMintedReward"`
+	TotalBurnMinted     decimal.Decimal `json:"TotalBurnMinted"`
+	TotalExplicitMinted decimal.Decimal `json:"TotalExplicitMinted"`
+}
+
+// MinerMinted 返回「发给出块者的奖励」，即 filscan 的「出块奖励」口径。
+func (r RewardActorDetail) MinerMinted() decimal.Decimal {
+	return minerMinted(r.TotalStoragePowerReward, r.TotalMintedReward, r.TotalBurnMinted, r.TotalExplicitMinted)
+}
+
+// minerMinted 统一 NV29 升级前后的「矿工出块奖励」口径：
+//   - NV29 之前：状态里的 TotalStoragePowerReward 本身就是矿工份额，直接用；
+//   - NV29 起：TotalMintedReward 是全部铸造量，矿工份额 = TotalMintedReward - TotalBurnMinted - TotalExplicitMinted
+//     （对齐 lotus streams.go 的 MinerMinted()）。
+func minerMinted(legacy, minted, burn, explicit decimal.Decimal) decimal.Decimal {
+	if !legacy.IsZero() {
+		return legacy
+	}
+	if minted.IsZero() {
+		return decimal.Zero
+	}
+	return minted.Sub(burn).Sub(explicit)
 }
 
 type ThisEpochSmoothed struct {

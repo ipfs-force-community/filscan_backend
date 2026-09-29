@@ -3,6 +3,8 @@ package browser
 import (
 	"context"
 	"encoding/json"
+	"strings"
+
 	"github.com/dustin/go-humanize"
 	filscan "gitlab.forceup.in/fil-data-factory/filscan-backend/api"
 	"gitlab.forceup.in/fil-data-factory/filscan-backend/modules/common/config"
@@ -27,36 +29,48 @@ type MinerRankBiz struct {
 }
 
 func (m MinerRankBiz) MinerRank(ctx context.Context, query filscan.PagingQuery) (resp *filscan.MinerRankResponse, err error) {
-	
+
 	err = query.Valid()
 	if err != nil {
 		return
 	}
-	
+
 	epoch, err := m.se.MinerEpoch(ctx)
 	if err != nil {
 		return
 	}
-	
+
 	if epoch == nil {
 		return
 	}
-	
+
 	var items []*bo.MinerRank
 	var total int64
 	items, total, err = m.repo.GetMinerRanks(ctx, *epoch, query)
 	if err != nil {
 		return
 	}
-	
+
 	a := assembler.MinerRankAssembler{}
 	resp, err = a.ToMinerRankResponse(total, query.Index, query.Limit, items)
 	if err != nil {
 		return
 	}
 	resp.UpdatedAt = epoch.Time().Unix()
-	
+
 	return
+}
+
+// parseRankSectorSize 解析排行榜的 sector_size 过滤。
+// 注意：前端的「全部」档位传的是字符串 "all"（也可能是空串），两者都表示「不按扇区类型过滤」→ 返回 0。
+// 修复前的写法把 "all" 直接交给 humanize.ParseBytes，必然报错并让接口返回 500
+// —— 于是「算力增速 / Rewards」两个页签在默认档位下永远打不开（页面显示 No data）。
+func parseRankSectorSize(s string) (uint64, error) {
+	switch strings.ToLower(strings.TrimSpace(s)) {
+	case "", "all":
+		return 0, nil
+	}
+	return humanize.ParseBytes(s)
 }
 
 func (m MinerRankBiz) MinerPowerRank(ctx context.Context, query filscan.IntervalSectorPagingQuery) (resp *filscan.MinerPowerRankResponse, err error) {
@@ -64,22 +78,22 @@ func (m MinerRankBiz) MinerPowerRank(ctx context.Context, query filscan.Interval
 	if err != nil {
 		return
 	}
-	
+
 	epoch, err := m.se.MinerEpoch(ctx)
 	if err != nil {
 		return
 	}
-	
+
 	if epoch == nil {
 		return
 	}
-	
+
 	var it interval.Interval
 	it, err = interval.ResolveInterval(query.Interval, *epoch)
 	if err != nil {
 		return
 	}
-	
+
 	for {
 		var t *chain.Epoch
 		t, err = m.se.GetMinerEpochOrNil(ctx, it.Start())
@@ -95,33 +109,31 @@ func (m MinerRankBiz) MinerPowerRank(ctx context.Context, query filscan.Interval
 			break
 		}
 	}
-	
+
 	if *epoch <= 0 {
 		return
 	}
-	
-	var sectorSize = uint64(0)
-	if query.SectorSize != "" {
-		sectorSize, err = humanize.ParseBytes(query.SectorSize)
-		if err != nil {
-			return
-		}
+
+	var sectorSize uint64
+	sectorSize, err = parseRankSectorSize(query.SectorSize)
+	if err != nil {
+		return
 	}
-	
+
 	var items []*bo.MinerPowerRank
 	var total int64
 	items, total, err = m.repo.GetMinerPowerRanks(ctx, *epoch, it.Start(), sectorSize, query.PagingQuery)
 	if err != nil {
 		return
 	}
-	
+
 	a := assembler.MinerRankAssembler{}
 	resp, err = a.ToMinerPowerRankResponse(total, query.Index, query.Limit, items)
 	if err != nil {
 		return
 	}
 	resp.UpdatedAt = epoch.Time().Unix()
-	
+
 	return
 }
 
@@ -130,7 +142,7 @@ func (m MinerRankBiz) MinerRewardRank(ctx context.Context, query filscan.Interva
 	if err != nil {
 		return
 	}
-	
+
 	cacheKey, err := m.redis.HexCacheKey(ctx, query)
 	if err != nil {
 		return
@@ -146,42 +158,40 @@ func (m MinerRankBiz) MinerRewardRank(ctx context.Context, query filscan.Interva
 		}
 		return resp, nil
 	}
-	
+
 	minerEpoch, err := m.se.MinerEpoch(ctx)
 	if err != nil {
 		return
 	}
-	
+
 	if minerEpoch == nil {
 		return
 	}
-	
-	var sectorSize = uint64(0)
-	if query.SectorSize != "" {
-		sectorSize, err = humanize.ParseBytes(query.SectorSize)
-		if err != nil {
-			return
-		}
+
+	var sectorSize uint64
+	sectorSize, err = parseRankSectorSize(query.SectorSize)
+	if err != nil {
+		return
 	}
-	
+
 	var items []*bo.MinerRewardRank
 	var total int64
 	items, total, err = m.repo.GetMinerRewardRanks(ctx, query.Interval, *minerEpoch, sectorSize, query.PagingQuery)
 	if err != nil {
 		return
 	}
-	
+
 	a := assembler.MinerRankAssembler{}
 	resp, err = a.ToMinerRewardRankResponse(total, query.Index, query.Limit, items)
 	if err != nil {
 		return
 	}
 	resp.UpdatedAt = minerEpoch.Time().Unix()
-	
+
 	err = m.redis.Set(cacheKey, resp, chain.NextEpochInterval())
 	if err != nil {
 		return
 	}
-	
+
 	return
 }

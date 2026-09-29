@@ -103,6 +103,9 @@ func (b BaselineTask) getRewardActorState(ctx context.Context, adapter londobell
 	if err != nil {
 		return
 	}
+	// NV29(Solstice)：新状态只有 TotalMintedReward（全部铸造量）。
+	// 落库时把 TotalStoragePowerReward 保持为「矿工出块奖励」的历史口径，避免下游按老字段名读到时是 0 或是被高估的值。
+	state.TotalStoragePowerReward = state.MinerMinted()
 
 	return
 }

@@ -35,7 +35,8 @@ func TestNewComer(t *testing.T) {
 	task := calc_change_actor_task.NewCalcChangeActorTask(dal.NewChangeActorTaskDal(db))
 	
 	preEpoch := chain.Epoch(2965576)
-	actor, err := task.PrepareActor(syncer.NewTestContext(adapter, agg, 2965577), "f02227281", preEpoch)
+	// old 传 nil：走「库里没有该 actor」的路径（即 NewComer 判定分支）
+	actor, err := task.PrepareActor(syncer.NewTestContext(adapter, agg, 2965577), chain.SmartAddress("f02227281"), preEpoch, nil)
 	require.NoError(t, err)
 	
 	spew.Json(actor)

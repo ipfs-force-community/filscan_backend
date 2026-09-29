@@ -124,7 +124,9 @@ func (a IndexAclImpl) GetRewardIncrease24H(ctx context.Context, epoch chain.Epoc
 	if err != nil {
 		return decimal.Zero, err
 	}
-	rewardIncrease24H := startRewardState.TotalStoragePowerReward.Sub(endRewardState.TotalStoragePowerReward)
+	// NV29(Solstice)：新状态里 TotalStoragePowerReward 改名且语义变为「全部铸造量」，
+	// 用 MinerMinted() 统一成「矿工出块奖励」口径（= TotalMinted - TotalBurnMinted - TotalExplicitMinted）
+	rewardIncrease24H := startRewardState.MinerMinted().Sub(endRewardState.MinerMinted())
 	return rewardIncrease24H, err
 }
 
@@ -257,7 +259,8 @@ func (a IndexAclImpl) GetTotalRewards(ctx context.Context, epoch chain.Epoch) (t
 	if err != nil {
 		return
 	}
-	totalRewards = rewardState.TotalStoragePowerReward
+	// NV29(Solstice)：同上，总奖励也用「矿工出块奖励」口径
+	totalRewards = rewardState.MinerMinted()
 	return
 }
 

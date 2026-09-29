@@ -8,6 +8,7 @@ import (
 	prorepo "gitlab.forceup.in/fil-data-factory/filscan-backend/modules/pro/infra/repo"
 	"gitlab.forceup.in/fil-data-factory/filscan-backend/modules/pro/merger"
 	"gitlab.forceup.in/fil-data-factory/filscan-backend/pkg/chain"
+	"gitlab.forceup.in/fil-data-factory/filscan-backend/pkg/chain/upgrader/message_detail"
 )
 
 type MinersPowerStats interface {
@@ -114,8 +115,22 @@ func (m minersPowerStats) dayPowerStat(ctx context.Context, miners []chain.Smart
 			FaultSectors:          v.FaultSectors,
 		}
 		
-		item.VdcPower = chain.Byte(item.QualityAdjPower.Decimal().Sub(item.RawBytePower.Decimal()).Div(decimal.NewFromInt(9)))
-		item.CcPower = chain.Byte(item.RawBytePower.Decimal().Sub(item.VdcPower.Decimal()))
+		// VDC/CC（raw 口径：VdcPower + CcPower = RawBytePower）。
+		//
+		// 老口径 VDC = (QA-raw)/9 成立的前提是「QA 相对 raw 的超额只可能来自 verified deal 的
+		// 10x」。NV29（Solstice / FIP-0118）之后这个前提没了：带 FULL_QA_POWER 的扇区同样贡献
+		// 9*size 的超额，但 FIP-0118 之后没有 verified deal，这部分属于容量算力（CC）。
+		// 聚合层只有 (QA, raw) 两个数，无法区分「老扇区的 VDW」与「新扇区的 FULL 标志」，
+		// 因此 epoch >= UpgradeSolsticeHeight 时不再反推 VDC，超额一律按容量算力处理。
+		// 逐 miner 的权威三桶（QA 口径）在 pro.miner_dcs / pro.miner_sectors，由 sector-task
+		// 按 pkg/londobell.QASplit 的新口径写入。
+		if epochs.LtEnd >= message_detail.UpgradeSolsticeHeight {
+			item.VdcPower = chain.Byte{}
+			item.CcPower = item.RawBytePower
+		} else {
+			item.VdcPower = chain.Byte(item.QualityAdjPower.Decimal().Sub(item.RawBytePower.Decimal()).Div(decimal.NewFromInt(9)))
+			item.CcPower = chain.Byte(item.RawBytePower.Decimal().Sub(item.VdcPower.Decimal()))
+		}
 		
 		if vv, ok := zeroInfos[v.Miner]; ok {
 			item.TotalSectorsZero = v.LiveSectors - vv.LiveSectors
