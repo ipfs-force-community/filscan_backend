@@ -21,6 +21,7 @@ import (
 	"gitlab.forceup.in/fil-data-factory/filscan-backend/modules/common/repository"
 	"gitlab.forceup.in/fil-data-factory/filscan-backend/modules/filscan/acl"
 	"gitlab.forceup.in/fil-data-factory/filscan-backend/pkg/chain"
+	"gitlab.forceup.in/fil-data-factory/filscan-backend/pkg/chain/upgrader/message_detail"
 	"gitlab.forceup.in/fil-data-factory/filscan-backend/pkg/londobell"
 	"gitlab.forceup.in/fil-data-factory/filscan-backend/types"
 )
@@ -66,8 +67,8 @@ func (i *IndexBiz) cacheTotalIndicators() {
 			}
 			if len(epoch) > 0 &&
 				(i.totalIndicators == nil ||
-				epoch[0].ID > i.totalIndicators.TotalIndicators.LatestHeight ||
-				time.Since(i.lastCacheTime) > 5*time.Second) {
+					epoch[0].ID > i.totalIndicators.TotalIndicators.LatestHeight ||
+					time.Since(i.lastCacheTime) > 5*time.Second) {
 				var resp *filscan.TotalIndicatorsResponse
 				resp, err = i.getTotalIndicators(context.Background(), filscan.TotalIndicatorsRequest{})
 				if err != nil {
@@ -295,8 +296,11 @@ func (i *IndexBiz) getTotalIndicators(ctx context.Context, req filscan.TotalIndi
 		Others:             sum.Sub(contractGas),
 	}
 
-	resp.TotalIndicators.Dc = netPower.QualityPower.Sub(netPower.RawBytePower).Div(decimal.NewFromInt(9))
-	resp.TotalIndicators.Cc = netPower.RawBytePower.Sub(resp.TotalIndicators.Dc)
+	// NV29(FIP-0118) 之后 FIL+ 已冻结：dc 归零、cc = raw（质量增益不再等于 datacap 算力）。
+	// 口径实现在 chain.DcCcSplit，与统计页 DCTrend 共用，避免两处再次分叉。
+	dc, cc, _ := chain.DcCcSplit(epoch.Int64(), message_detail.UpgradeSolsticeHeight.Int64(), netPower.QualityPower, netPower.RawBytePower)
+	resp.TotalIndicators.Dc = dc
+	resp.TotalIndicators.Cc = cc
 
 	return
 }
