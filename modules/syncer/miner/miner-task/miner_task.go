@@ -62,6 +62,12 @@ func (m MinerInfoTask) Name() string {
 	return "miner-task"
 }
 
+// minerSnapshotInterval 快照粒度：每个整点写一次（120 epoch = 1 小时）。
+const minerSnapshotInterval = 120
+
+// minerSelfHealHours 自愈窗口：每个整点回看最近 N 个小时是否缺快照，缺了就补。
+const minerSelfHealHours = 3
+
 func (m MinerInfoTask) Exec(ctx *syncer.Context) (err error) {
 
 	if m.GapScan {
@@ -74,6 +80,13 @@ func (m MinerInfoTask) Exec(ctx *syncer.Context) (err error) {
 			ctx.Infof("该高度已存在记录，忽略同步")
 			return
 		}
+	}
+
+	// 自愈补洞：聚合器对整点数据的发布滞后约 1 小时，而同步器过该整点时只过了十几分钟，
+	// 拿不到数据就 return（原实现），之后不会再回来 —— 排行榜/走势会永久锚在缺口处。
+	// 这里在实时同步路径（非 GapScan）上做 best-effort 补齐，失败只记日志，不影响当前高度。
+	if !m.GapScan {
+		defer m.selfHeal(ctx)
 	}
 
 	if !m.conf.TestNet {
@@ -185,6 +198,91 @@ func (m MinerInfoTask) Exec(ctx *syncer.Context) (err error) {
 		}
 	}
 	return m.repo.SaveAbsPower(ctx.Context(), powerIncrease, powerLoss, ctx.Epoch().Int64())
+}
+
+// selfHeal 在实时同步路径上补齐最近几个整点的缺失快照。
+// best-effort：任何失败只记日志，绝不影响当前高度的同步结果。
+func (m MinerInfoTask) selfHeal(ctx *syncer.Context) {
+	if err := m.selfHealRecentHours(ctx); err != nil {
+		log.Warnf("[self-heal] 补齐整点 miner 快照失败: %s", err)
+	}
+}
+
+// selfHealRecentHours 只回看 minerSelfHealHours 个整点：
+//   - 只在整点触发（与快照粒度一致），成本是每整点多 N 次聚合器查询；
+//   - 已有数据的整点直接跳过，不覆盖；
+//   - 聚合器仍未发布的整点留到下一个整点再看。
+func (m MinerInfoTask) selfHealRecentHours(ctx *syncer.Context) (err error) {
+	if ctx.Epoch()%minerSnapshotInterval != 0 {
+		return nil
+	}
+	for h := int64(1); h <= minerSelfHealHours; h++ {
+		he := ctx.Epoch() - chain.Epoch(h*minerSnapshotInterval)
+		if he <= 0 {
+			return nil
+		}
+
+		var exist []*po.MinerInfo
+		exist, err = m.repo.GetMinerInfosByEpoch(ctx.Context(), he)
+		if err != nil {
+			return
+		}
+		if len(exist) > 0 {
+			continue
+		}
+
+		var infos []*londobell.MinerInfo
+		infos, err = ctx.Agg().MinersInfo(ctx.Context(), he, he.Next())
+		if err != nil {
+			return
+		}
+		if len(infos) == 0 {
+			continue
+		}
+
+		var totalPower decimal.Decimal
+		totalPower, err = m.GetNetQualityAdjPower(ctx)
+		if err != nil {
+			return
+		}
+
+		var minerInfos []*po.MinerInfo
+		minerInfos, err = m.handlerMinerInfos(infos, totalPower)
+		if err != nil {
+			return
+		}
+		var ownerInfos []*po.OwnerInfo
+		ownerInfos, err = m.convertOwnerInfos(he, minerInfos)
+		if err != nil {
+			return
+		}
+
+		sort.Sort(QualityAdjPowerMinersRank(minerInfos))
+		for i, v := range minerInfos {
+			v.QualityAdjPowerRank = int64(i + 1)
+		}
+		sort.Sort(QualityAdjPowerOwnersRank(ownerInfos))
+		for i, v := range ownerInfos {
+			v.QualityAdjPowerRank = int64(i + 1)
+		}
+
+		err = m.save(ctx.Context(), minerInfos, ownerInfos)
+		if err != nil {
+			return
+		}
+
+		// 台账决定走势/排行榜的采样锚点：补快照必须同时补台账，否则页面仍锚在缺口处。
+		if e := m.repo.SaveSyncMinerEpochPo(ctx.Context(), &po.SyncMinerEpochPo{
+			Epoch:           he.Int64(),
+			EffectiveMiners: int64(len(minerInfos)),
+			Owners:          int64(len(ownerInfos)),
+		}); e != nil {
+			log.Warnf("[self-heal] 补台账失败 epoch=%d: %s", he, e)
+		}
+
+		ctx.Infof("[self-heal] 补齐整点 miner 快照: epoch=%d 矿工=%d 存储池=%d", he, len(minerInfos), len(ownerInfos))
+	}
+	return
 }
 
 func (m MinerInfoTask) GetNetQualityAdjPower(ctx *syncer.Context) (power decimal.Decimal, err error) {
