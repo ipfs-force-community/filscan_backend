@@ -35,8 +35,13 @@ from pg_inherits i
 where i.inhparent = 'chain.miner_win_counts'::regclass
 group by c.relname
 order by c.relname desc;
--- 期望：negative_rows 恒为 0（非 0 = 回填公式的模型被打破：penalty>0 或奖励 actor 余额不足，
---       该分区的 gas_reward 不可信，需人工核对该高度区间的聚合器返回值）
+-- 期望：negative_rows 恒为 0（**归一化之后**；归一化见 05_normalize_negatives.sql）。
+--       回填刚跑完、还没归一化时，负值是**正常**的：2026-09-30 生产实测 2,015,596 行负值里
+--         1,987,583 行（98.6%）恰好 = -1 ⇒ 只是 ±1 attoFIL 取整边界的下沿，真值必为 0（可证），
+--                                     跑 05 精确置 0 即可，**不是模型失真**；
+--            28,013 行（1.4%）≤ -2   ⇒ 这才是真偏差（penalty>0 / 奖励 actor 余额不足，
+--                                     量级 ≤ ~1e-6 FIL），跑 05 置 NULL ⇒ 读路径整请求回落聚合器。
+--       所以：先按「= -1 / ≤ -2」拆开看；只有 ≤ -2 的那批才需要人工核对聚合器返回值。
 
 -- ============================================================
 -- C. 单分区精确体检（把 <PARTITION> 换成 B 段输出的分区名）

@@ -146,6 +146,9 @@ echo "分区处理 $processed 个（跳过 $skipped 个），共 ${total_updated
 if [ "$DRY_RUN" -eq 1 ]; then
   echo "这是 dry-run：没有任何写入。确认影响面后加 --yes 正式跑。"
 else
-  echo "下一步：跑 ops/wincount_gas_reward/03_validate.sql 看逐分区 NULL 行数与 negative_rows（应为 0）。"
-  echo "      负值非 0 = 该分区命中「penalty>0 / 奖励 actor 余额不足」的偏差，需要人工核对聚合器返回值。"
+  echo "下一步：跑 ops/wincount_gas_reward/03_validate.sql 看逐分区 NULL 行数与 negative_rows。"
+  echo "      回填刚跑完时负值是正常的：实测 98.6% 恰好 = -1（±1 attoFIL 取整边界，真值必为 0），"
+  echo "      只有 ≤ -2 的那批（实测 1.4%）才是真偏差。"
+  echo "      ⇒ 跑 ops/wincount_gas_reward/05_normalize_negatives.sql 归一化（-1 置 0、≤-2 置 NULL），"
+  echo "        再用 06_validate_after_normalize.sql 断言 negative_rows = 0。"
 fi
