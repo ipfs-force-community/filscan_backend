@@ -486,8 +486,8 @@ func emitText(results []rewardparity.Result, opt options, db *gorm.DB, p rewardp
 				r.AggRows, float64(r.AggLatency.Microseconds())/1000, r.PgRows, float64(r.PgLatency.Microseconds())/1000)
 			fmt.Printf("总量:   聚合器 reward=%s block=%d win=%d gasReward=%s\n",
 				r.AggSumReward.String(), r.AggSumBlock, r.AggSumWin, r.AggSumGas.String())
-			fmt.Printf("        PG     reward=%s block=%d win=%d gasReward=（PG 无该列，PG 路径恒 0）\n",
-				r.PgSumReward.String(), r.PgSumBlock, r.PgSumWin)
+			fmt.Printf("        PG     reward=%s block=%d win=%d gasReward=%s\n",
+				r.PgSumReward.String(), r.PgSumBlock, r.PgSumWin, r.PgSumGas.String())
 			fmt.Printf("差异:   字段差异 %d 条（数值不等 %d / 仅文本不同 %d）；点位缺失 聚合器独有 %d 个、PG 独有 %d 个\n",
 				r.DiffCount, r.ValueDiffCount, r.FormatOnlyDiff, r.AggOnlyCount(), r.PgOnlyCount())
 		}

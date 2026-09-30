@@ -5,7 +5,8 @@
 //
 //   - 点位集合：分别在两条路径上出现、对方没有的 key（覆盖缺口 / 区间口径 off-by-one）
 //   - 字段值：数值不等（真错）与「数值相等但文本形态不同」（金额格式风险，前端展示会变）
-//   - 无来源字段：聚合器返回但 PG 没有对应列（wincount 的 TotalGasReward）
+//   - 无来源字段：聚合器返回但 PG 没有数据来源的字段（现在只剩「gas_reward 尚未回填」这一种情形，
+//     migration/36 之前 wincount 的 TotalGasReward 是永久性的无来源字段）
 //
 // 计数（*Count 字段）是**全量**的，Diffs/AggOnly/PgOnly 只是**最多 N 条样例**：
 // 报告里的数字可以直接当门禁用，样例只用于定位。
@@ -102,6 +103,9 @@ type Result struct {
 	AggSumWin    int64
 	PgSumWin     int64
 	AggSumGas    decimal.Decimal
+	// PgSumGas PG 侧 gas_reward 汇总；仅在 gas_reward 全部非 NULL 时才有意义
+	// （有未回填行时它偏小，此时 Unresolved 会给出说明）。
+	PgSumGas decimal.Decimal
 
 	AggLatency time.Duration
 	PgLatency  time.Duration
@@ -339,21 +343,34 @@ func CompareMinersBlockReward(p Params, agg []*londobell.MinersBlockReward, pg [
 	return r
 }
 
-// CompareWinCount 比对 wincount：聚合器按 miner 分组（Id=miner），PG 侧无 gas reward 列。
+// CompareWinCount 比对 wincount：聚合器按 miner 分组（Id=miner），PG 侧按 miner 汇总 win_count + gas_reward。
+//
+// TotalGasReward（migration/36 起有 gas_reward 列）：PG 侧齐了就逐值比对；
+// 只要有一行的 GasReward 为 nil（历史行未回填），就记一条 Unresolved 并跳过该字段的逐值比对 ——
+// 因为此时 PG 的 sum 本身残缺，报「不等」是噪声。回填进度用 ops/wincount_gas_reward/03_validate.sql 看。
 func CompareWinCount(p Params, agg []*londobell.MinerWinCount, pg []*bo.AccWinCount, maxEx MaxExamples) Result {
 	r := Result{
-		Endpoint:   EndpointWinCount,
-		Params:     p,
-		AggRows:    len(agg),
-		PgRows:     len(pg),
-		Unresolved: []string{"TotalGasReward（PG 无对应列；PG 路径恒返回 0）"},
+		Endpoint: EndpointWinCount,
+		Params:   p,
+		AggRows:  len(agg),
+		PgRows:   len(pg),
 	}
 	c := newRecorder(maxEx.limit())
 
 	pgByMiner := make(map[string]*bo.AccWinCount, len(pg))
+	gasRewardComplete := true
 	for _, row := range pg {
 		pgByMiner[normalizeMiner(row.Miner)] = row
 		r.PgSumWin += row.WinCount
+		if row.GasReward != nil {
+			r.PgSumGas = r.PgSumGas.Add(*row.GasReward)
+		}
+		if row.GasReward == nil || row.GasRewardRows < row.TotalRows {
+			gasRewardComplete = false
+		}
+	}
+	if !gasRewardComplete {
+		r.Unresolved = []string{"TotalGasReward：本区间仍有 gas_reward IS NULL 的行（migration/36 之后尚未回填），PG 侧汇总不完整，已跳过逐值比对"}
 	}
 
 	seen := make(map[string]bool, len(agg))
@@ -372,10 +389,8 @@ func CompareWinCount(p Params, agg []*londobell.MinerWinCount, pg []*bo.AccWinCo
 			continue
 		}
 		c.recordInt64(key, "TotalWinCount", item.TotalWinCount, row.WinCount)
-		// TotalGasReward 在 PG 无来源：显式记一条「数值不等」的差异，
-		// 不给「悄悄用 0 顶过去」的机会（聚合器侧本来就是 0 时不记）。
-		if !item.TotalGasReward.IsZero() {
-			c.record(key, "TotalGasReward", item.TotalGasReward.String(), "0 (PG 无来源)", false, true)
+		if gasRewardComplete && row.GasReward != nil {
+			c.recordDecimal(key, "TotalGasReward", item.TotalGasReward, *row.GasReward)
 		}
 	}
 	for _, row := range pg {

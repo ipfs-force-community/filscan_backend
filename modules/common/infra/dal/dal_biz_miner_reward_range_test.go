@@ -38,6 +38,12 @@ func TestRewardRangeSQLSemantics(t *testing.T) {
 			if c.needsSum && !strings.Contains(lower, "sum(win_count)") {
 				t.Errorf("%s 必须按 miner 求和 win_count", c.name)
 			}
+			if c.needsSum && !strings.Contains(lower, "sum(gas_reward)") {
+				t.Errorf("%s 必须按 miner 求和 gas_reward（migration/36 的 TotalGasReward 来源）", c.name)
+			}
+			if c.needsSum && !strings.Contains(lower, "count(gas_reward)") {
+				t.Errorf("%s 必须带 count(gas_reward) 回填进度探针（否则读路径分不清 NULL 与 0）", c.name)
+			}
 		})
 	}
 }
@@ -46,9 +52,12 @@ func TestRewardRangeSQLSemantics(t *testing.T) {
 // 否则重复行会被直接放大（同一高度重跑同步 → 赢票数 ×N）。
 func TestMinerWinCountsDedupBeforeSum(t *testing.T) {
 	sql := normalizeSQL(SQLMinerWinCountsRange)
-	want := "select miner, sum(win_count) as win_count from (select distinct on (epoch, miner)"
+	want := "select miner, sum(win_count) as win_count, sum(gas_reward) as gas_reward, count(*) as total_rows, count(gas_reward) as gas_reward_rows from (select distinct on (epoch, miner)"
 	if !strings.Contains(sql, want) {
 		t.Errorf("必须是「外层 sum、数据来源是 DISTINCT ON 子查询」，实际 SQL 结构不符:\n%s", sql)
+	}
+	if !strings.Contains(sql, "gas_reward from chain.miner_win_counts") {
+		t.Errorf("gas_reward 必须在 DISTINCT ON 子查询内（否则重复行会把 gas 放大 N 倍）:\n%s", sql)
 	}
 	if strings.Contains(sql, "sum(distinct") {
 		t.Error("不得用 sum(distinct win_count)：它会把不同 epoch 的相同值也吃掉，口径错")

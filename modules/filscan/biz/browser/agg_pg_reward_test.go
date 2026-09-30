@@ -200,15 +200,21 @@ func TestPgRewardEmptyResultIsNil(t *testing.T) {
 	}
 }
 
-// wincount：Id 给不带前缀形态（与聚合器 _id 一致）、TotalGasReward 恒 0（PG 无该列）。
+// wincount：Id 给不带前缀形态（与聚合器 _id 一致）、TotalWinCount=win_count、TotalGasReward=gas_reward。
 func TestPgRewardWinCountMapping(t *testing.T) {
 	agg := &fakeAgg{}
-	reader := &fakeReader{wins: []*bo.AccWinCount{{Miner: "f01234", WinCount: 12}}}
+	gas := decimal.RequireFromString("214208455099239")
+	reader := &fakeReader{wins: []*bo.AccWinCount{
+		{Miner: "f01234", WinCount: 12, GasReward: &gas, TotalRows: 1, GasRewardRows: 1},
+	}}
 	wrapped := NewPgRewardAggWithReader(agg, reader, PgRewardOptions{MinerWinCount: true})
 
 	rows, err := wrapped.WinCount(context.Background(), 100, 200)
 	if err != nil || len(rows) != 1 {
 		t.Fatalf("读 PG 失败: err=%v rows=%d", err, len(rows))
+	}
+	if agg.winCountCalls != 0 {
+		t.Errorf("gas_reward 齐了就不该回落聚合器，实际调用 %d 次", agg.winCountCalls)
 	}
 	if rows[0].Id != "01234" {
 		t.Errorf("Id 应为不带前缀形态 01234，得到 %q", rows[0].Id)
@@ -216,11 +222,66 @@ func TestPgRewardWinCountMapping(t *testing.T) {
 	if rows[0].TotalWinCount != 12 {
 		t.Errorf("TotalWinCount 映射错误: %d", rows[0].TotalWinCount)
 	}
-	if !rows[0].TotalGasReward.IsZero() {
-		t.Errorf("TotalGasReward 无 PG 来源，应恒 0，得到 %s", rows[0].TotalGasReward.String())
+	if rows[0].TotalGasReward.String() != "214208455099239" {
+		t.Errorf("TotalGasReward 应原样映射 gas_reward（attoFIL 不许换算），得到 %q", rows[0].TotalGasReward.String())
 	}
-	if rows[0].TotalGasReward.String() != "0" {
-		t.Errorf("TotalGasReward 文本形态应为 0，得到 %q", rows[0].TotalGasReward.String())
+}
+
+// gas_reward 为 NULL（未回填）时**必须**回落聚合器：TotalGasReward 的消费点
+// acl_block_chain.GetBlockDetails 拿它算 TxFeeReward / MinedReward，用 0 顶过去就是把金额算错。
+func TestPgRewardWinCountNilGasRewardFallsBack(t *testing.T) {
+	agg := &fakeAgg{winCountResult: []*londobell.MinerWinCount{
+		{Id: "01234", TotalWinCount: 12, TotalGasReward: decimal.RequireFromString("999")},
+	}}
+	reader := &fakeReader{wins: []*bo.AccWinCount{{Miner: "f01234", WinCount: 12, TotalRows: 1}}}
+	wrapped := NewPgRewardAggWithReader(agg, reader, PgRewardOptions{MinerWinCount: true})
+
+	rows, err := wrapped.WinCount(context.Background(), 100, 200)
+	if err != nil {
+		t.Fatalf("回落失败: %s", err)
+	}
+	if agg.winCountCalls != 1 {
+		t.Fatalf("gas_reward 为 NULL 时必须回落聚合器，实际调用 %d 次", agg.winCountCalls)
+	}
+	if len(rows) != 1 || rows[0].TotalGasReward.String() != "999" {
+		t.Errorf("应返回聚合器结果，得到 %+v", rows)
+	}
+}
+
+// 部分回填（GasRewardRows < TotalRows）同样算残缺：这一行的 sum 只覆盖了一部分行。
+func TestPgRewardWinCountPartiallyBackfilledFallsBack(t *testing.T) {
+	agg := &fakeAgg{winCountResult: []*londobell.MinerWinCount{{Id: "01234", TotalWinCount: 12}}}
+	gas := decimal.RequireFromString("999")
+	reader := &fakeReader{wins: []*bo.AccWinCount{
+		// 第一行齐、第二行 3 条里只有 1 条有值 ⇒ 整区间回落
+		{Miner: "f01234", WinCount: 12, GasReward: &gas, TotalRows: 1, GasRewardRows: 1},
+		{Miner: "f05678", WinCount: 1, GasReward: &gas, TotalRows: 3, GasRewardRows: 1},
+	}}
+	wrapped := NewPgRewardAggWithReader(agg, reader, PgRewardOptions{MinerWinCount: true})
+
+	if _, err := wrapped.WinCount(context.Background(), 100, 200); err != nil {
+		t.Fatalf("回落失败: %s", err)
+	}
+	if agg.winCountCalls != 1 {
+		t.Fatalf("部分回填时必须回落聚合器，实际调用 %d 次", agg.winCountCalls)
+	}
+}
+
+// gas_reward 合法为 0 时**不能**回落：0 是聚合器的正常取值（线上实测同一 epoch 有 10 个矿工就是 0）。
+func TestPgRewardWinCountZeroGasRewardDoesNotFallBack(t *testing.T) {
+	agg := &fakeAgg{err: errors.New("gas_reward 为 0 时不该回落聚合器")}
+	zero := decimal.Zero
+	reader := &fakeReader{wins: []*bo.AccWinCount{
+		{Miner: "f01234", WinCount: 1, GasReward: &zero, TotalRows: 1, GasRewardRows: 1},
+	}}
+	wrapped := NewPgRewardAggWithReader(agg, reader, PgRewardOptions{MinerWinCount: true})
+
+	rows, err := wrapped.WinCount(context.Background(), 100, 200)
+	if err != nil || len(rows) != 1 {
+		t.Fatalf("应走 PG: err=%v rows=%d", err, len(rows))
+	}
+	if !rows[0].TotalGasReward.IsZero() || rows[0].TotalGasReward.String() != "0" {
+		t.Errorf("TotalGasReward 应为 0，得到 %q", rows[0].TotalGasReward.String())
 	}
 }
 

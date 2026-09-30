@@ -27,14 +27,21 @@ import (
 //
 // 落库侧（同步器，同一批聚合结果的原样落盘）：
 //
-//	modules/syncer/chain/reward_task/reward_task.go:178-185  reward = TotalBlockReward（原样，无单位换算）
-//	modules/syncer/chain/reward_task/reward_task.go:104-111  win_count = TotalWinCount（原样）
+//	modules/syncer/chain/reward_task/reward_task.go:187-194  reward = TotalBlockReward（原样，无单位换算）
+//	modules/syncer/chain/reward_task/reward_task.go:196-206  win_count = TotalWinCount、gas_reward = TotalGasReward（原样）
 //
-// ⇒ 读回来即可与本仓 pkg/londobell 的 decimal.Decimal 逐字段对齐；
+// ⇒ 读回来即可与本仓 pkg/londobell 的 decimal.Decimal 逐字段对齐。
 //
-// ⚠ 唯一对不齐的字段是 wincount 的 TotalGasReward：chain.miner_win_counts 只有 (epoch, miner, win_count)
-// 三列，gas reward 当初就没落库（写路径被本改造明确要求冻结，故此处不做也不该做任何回填）。
-// 详见 modules/filscan/biz/browser/agg_pg_reward.go 的说明。
+// gas_reward（migration/36.miner_win_counts_gas_reward.sql 起）：
+//
+//	聚合器 wincount 端点的 TotalGasReward = Σ Message.Detail.Params.GasReward，
+//	也就是 RewardActor.AwardBlockReward 隐式消息 params 的 GasReward 字段
+//	（specs-actors v0.9.15 actors/builtin/reward/reward_actor.go:56）。它一直在同一次响应里，
+//	此前只是 PO 没有列可落 ⇒ PG 路径该字段恒为 0，而它被 acl_block_chain.GetBlockDetails
+//	用来算 TxFeeReward / MinedReward（assembler_block_chain_info.go:42-58）。
+//
+//	历史行的 gas_reward 是 NULL，由 ops/wincount_gas_reward/ 的回填脚本补齐；
+//	未补齐前本 DAL 读出来的 sum 是残缺的，调用方用 total_rows/gas_reward_rows 判出来并回落聚合器。
 
 // SQLMinerBlockRewardRange 单矿工逐 epoch 出块奖励。
 //
@@ -83,13 +90,27 @@ order by epoch asc, miner asc`
 // （dal_task_reward.go:69-80）。同一高度重跑同步 → 同一 (epoch, miner) 会有多行**完全相同**的
 // win_count；若直接 sum(win_count) 会把该矿工的赢票数放大 N 倍（N=重跑次数）。
 // 故先 DISTINCT ON (epoch, miner) 收敛成「每个 (epoch,miner) 一行」再按 miner 求和。
+//
+// gas_reward（migration/36 起）：与 win_count 同一份聚合器响应落库，故去重与求和口径完全一致。
+// 额外的两列是**回填进度探针**，不是业务字段：
+//
+//	total_rows      = 去重后的行数
+//	gas_reward_rows = 其中 gas_reward 非 NULL 的行数
+//
+// 只要 gas_reward_rows < total_rows，本区间的 sum(gas_reward) 就是**残缺的**
+// （行数少的那些行是 migration/36 之前写入、尚未回填的），调用方必须回落聚合器 ——
+// 详见 agg_pg_reward.go 的 incompleteGasRewardRow。
 const SQLMinerWinCountsRange = `
 select miner,
-       sum(win_count) as win_count
+       sum(win_count)    as win_count,
+       sum(gas_reward)   as gas_reward,
+       count(*)          as total_rows,
+       count(gas_reward) as gas_reward_rows
 from (select distinct on (epoch, miner)
              epoch,
              miner,
-             win_count
+             win_count,
+             gas_reward
       from chain.miner_win_counts
       where epoch >= ?
         and epoch < ?
