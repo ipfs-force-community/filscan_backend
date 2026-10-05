@@ -24,7 +24,7 @@ import (
 //               ΔTotalStoragePowerReward，v19 = ΔTotalMintedReward − ΔTotalBurnMinted − ΔTotalExplicitMinted）；
 //     service = ΔTotalExplicitMinted（v18 恒 0）；burn = ΔTotalBurnMinted（v18 恒 0）；
 //     total   = miner + service + burn。
-//   - 单位 FIL（attoFIL 小数点左移 18 位，精确移位，不过浮点）。
+//   - 单位 attoFIL（原始计数器值，与统计页其它曲线一致；前端统一用 formatFil ÷1e18 显示）。
 //
 // nv29_epoch 取本仓既有的 message_detail.UpgradeSolsticeHeight；未排期（UpgradeHeightUnscheduled，
 // 主网当前）⇒ 0，前端据此决定不画 NV29 竖线。
@@ -101,13 +101,14 @@ func buildRewardStreamItems(snapshots []*londobell.RewardStream) []*filscan.Rewa
 
 		miner, service, burn = clampFlow(cur.Epoch, miner, service, burn)
 		total := miner.Add(service).Add(burn)
+		// 单位与统计页其它曲线一致：原始 attoFIL（前端统一用 formatFil ÷1e18 显示）。
 		items = append(items, &filscan.RewardStreamItem{
 			BlockTime: chain.Epoch(cur.Epoch).Time().Unix(),
 			Epoch:     cur.Epoch,
-			Miner:     attoToFil(miner),
-			Service:   attoToFil(service),
-			Burn:      attoToFil(burn),
-			Total:     attoToFil(total),
+			Miner:     miner,
+			Service:   service,
+			Burn:      burn,
+			Total:     total,
 		})
 	}
 	return items
@@ -130,11 +131,6 @@ func nonNegative(d decimal.Decimal) decimal.Decimal {
 		return decimal.Zero
 	}
 	return d
-}
-
-// attoToFil 把 attoFIL 精确换算成 FIL（小数点左移 18 位；attoFIL 恰为 10^-18 FIL，故无舍入）。
-func attoToFil(d decimal.Decimal) decimal.Decimal {
-	return d.Shift(-18)
 }
 
 // nv29EpochOrZero 把构建常量映射成对外输出：未排期（UpgradeHeightUnscheduled）或非正值 ⇒ 0。

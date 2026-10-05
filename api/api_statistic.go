@@ -301,8 +301,9 @@ type RewardStreamsResponse struct {
 	Items     []*RewardStreamItem `json:"items"`      // 区块奖励流向列表
 }
 
-// RewardStreamItem 是「区块奖励流向」的一个数据点：相邻两个整点快照的计数器差分之和，
-// 三个分量与总和单位均为 FIL（decimal），total = miner + service + burn。
+// RewardStreamItem 是「区块奖励流向」的一个数据点：相邻两个整点快照的计数器差分之和。
+// 三个分量与总和的单位都是 **attoFIL**（原始值，与统计页其它曲线一致；前端用 formatFil ÷1e18 显示），
+// total = miner + service + burn。
 type RewardStreamItem struct {
 	BlockTime int64           `json:"block_time"` // 区块时间（Unix 秒）
 	Epoch     int64           `json:"epoch"`

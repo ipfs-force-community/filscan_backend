@@ -60,7 +60,7 @@ func (f *fakeRewardStreamsSyncer) GetSyncer(_ context.Context, _ string) (*po.Sy
 	return &po.SyncSyncer{Name: "chain", Epoch: f.epoch}, nil
 }
 
-// v18→v19 真实相邻两行的差分：miner=ΔMinerMinted、service=ΔExplicit、burn=ΔBurn，单位 FIL。
+// v18→v19 真实相邻两行的差分：miner=ΔMinerMinted、service=ΔExplicit、burn=ΔBurn，单位 attoFIL。
 func TestBuildRewardStreamItemsRealNV29Pair(t *testing.T) {
 	items := buildRewardStreamItems([]*londobell.RewardStream{
 		mustStream(t, realV18Row),
@@ -77,11 +77,11 @@ func TestBuildRewardStreamItemsRealNV29Pair(t *testing.T) {
 		t.Fatalf("block_time 错: got %d", it.BlockTime)
 	}
 
-	// 期望值＝真实计数器差分 ÷ 1e18（attoFIL → FIL）。
-	wantMiner := decimal.RequireFromString("63607.681749016283526185")
-	wantService := decimal.RequireFromString("1664.003218449871124998")
-	wantBurn := decimal.RequireFromString("0.000000000000003338")
-	wantTotal := decimal.RequireFromString("65271.684967466154654521")
+	// 期望值＝真实计数器差分的原始值（单位 attoFIL，与统计页其它曲线一致）。
+	wantMiner := decimal.RequireFromString("63607681749016283526185")
+	wantService := decimal.RequireFromString("1664003218449871124998")
+	wantBurn := decimal.RequireFromString("3338")
+	wantTotal := decimal.RequireFromString("65271684967466154654521")
 
 	if !it.Miner.Equal(wantMiner) {
 		t.Fatalf("miner 差分错: got %s want %s", it.Miner, wantMiner)
@@ -107,14 +107,14 @@ func TestBuildRewardStreamItemsV18Only(t *testing.T) {
 		t.Fatalf("应得到 1 个数据点，得到 %d", len(items))
 	}
 	it := items[0]
-	if !it.Miner.Equal(decimal.NewFromInt(1)) { // 1e18 attoFIL = 1 FIL
-		t.Fatalf("v18 miner 应为 1 FIL，得到 %s", it.Miner)
+	if !it.Miner.Equal(decimal.RequireFromString("1000000000000000000")) { // 1e18 attoFIL = 1 FIL
+		t.Fatalf("v18 miner 应为 1e18 attoFIL，得到 %s", it.Miner)
 	}
 	if !it.Service.IsZero() || !it.Burn.IsZero() {
 		t.Fatalf("v18 service/burn 必须为 0，得到 service=%s burn=%s", it.Service, it.Burn)
 	}
-	if !it.Total.Equal(decimal.NewFromInt(1)) {
-		t.Fatalf("v18 total 应等于 miner=1，得到 %s", it.Total)
+	if !it.Total.Equal(decimal.RequireFromString("1000000000000000000")) {
+		t.Fatalf("v18 total 应等于 miner，得到 %s", it.Total)
 	}
 	assertRewardStreamInvariant(t, it)
 }
