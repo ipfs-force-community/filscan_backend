@@ -11,7 +11,7 @@ import (
 	"gorm.io/gorm"
 )
 
-func NewStatisticBiz(db *gorm.DB, adapter londobell.Adapter, conf *config.Config) *StatisticBiz {
+func NewStatisticBiz(agg londobell.Agg, db *gorm.DB, adapter londobell.Adapter, conf *config.Config) *StatisticBiz {
 	return &StatisticBiz{
 		StatisticBaseLineBiz:          NewStatisticBaseLineBiz(dal.NewSyncerDal(db), dal.NewStatisticBaseLineBizDal(db), dal.NewMinerGetterDal(db), adapter),
 		BaseFeeTrendBiz:               NewBaseFeeTrendBiz(dal.NewSyncerDal(db), dal.NewBaseFeeTrendBizDal(db)),
@@ -21,6 +21,7 @@ func NewStatisticBiz(db *gorm.DB, adapter londobell.Adapter, conf *config.Config
 		StatisticMessageCountTrendBiz: NewStatisticMessageCountTrendBiz(dal.NewSyncerDal(db), dal.NewStatisticMessageCountTrendBizDal(db)),
 		StatisticGasDataTrend:         NewStatisticGasDataTrendBiz(dal.NewGas24hTrendBizDal(db)),
 		StatisticDcTrendBiz:           NewStatisticDcTrendBiz(dal.NewSyncerDal(db), dal.NewDcTrendDal(db)),
+		StatisticRewardStreamsBiz:     NewStatisticRewardStreamsBiz(dal.NewSyncerDal(db), agg),
 		adapter:                       acl.NewStatisticAclImpl(adapter),
 	}
 }
@@ -35,6 +36,7 @@ type StatisticBiz struct {
 	*StatisticMessageCountTrendBiz
 	*StatisticGasDataTrend
 	*StatisticDcTrendBiz
+	*StatisticRewardStreamsBiz
 	*ContractTrendBiz
 	adapter *acl.StatisticAclImpl
 }

@@ -312,6 +312,23 @@ func (l LondobellAggImpl) ActorStateEpoch(ctx context.Context, epoch chain.Epoch
 	return
 }
 
+// RewardStreams 取 [start, end) 内 f02 奖励流的整点快照（契约 A，londobell 仓）。
+// 区间左闭右开，与 /aggregators/actor_state_epoch 同口径；只返回实际存在的快照，不做前值填充。
+func (l LondobellAggImpl) RewardStreams(ctx context.Context, start, end chain.Epoch) (result []*londobell.RewardStream, err error) {
+	resp, err := l.exec(ctx, "/aggregators/reward_streams", map[string]interface{}{
+		"start": start,
+		"end":   end,
+	})
+	if err != nil {
+		return
+	}
+	err = l.bindResult(resp, &result)
+	if err != nil {
+		return
+	}
+	return
+}
+
 func (l LondobellAggImpl) Tipset(ctx context.Context, epoch chain.Epoch) (result []*londobell.Tipset, err error) {
 	resp, err := l.exec(ctx, "/aggregators/tipset", map[string]interface{}{
 		"start": epoch,

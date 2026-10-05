@@ -38,6 +38,10 @@ type Agg interface {
 	LatestTipset(ctx context.Context) ([]*Tipset, error)
 	// ActorStateEpoch http://192.168.1.57:3000/project/13/interface/api/239
 	ActorStateEpoch(ctx context.Context, epoch chain.Epoch, addr chain.SmartAddress) ([]*ActorStateEpoch, error)
+	// RewardStreams http://<londobell>/aggregators/reward_streams —— 取 [start, end) 内
+	// f02 奖励 actor 的全部整点快照（NV29/FIP-0118 的奖励流计数器）。契约见
+	// .hermes/plans/2026-10-05-reward-streams-handoff.md §2（契约 A）。
+	RewardStreams(ctx context.Context, start, end chain.Epoch) ([]*RewardStream, error)
 	// Tipset http://192.168.1.57:3000/project/13/interface/api/243
 	Tipset(ctx context.Context, epoch chain.Epoch) ([]*Tipset, error)
 	// MinerInfo http://192.168.1.57:3000/project/13/interface/api/251
@@ -388,6 +392,24 @@ func minerMinted(legacy, minted, burn, explicit decimal.Decimal) decimal.Decimal
 		return decimal.Zero
 	}
 	return minted.Sub(burn).Sub(explicit)
+}
+
+// RewardStream 是 londobell 新接口 /aggregators/reward_streams 返回的单个整点快照里的
+// 奖励流计数器（契约 A）。四个字段恒定存在：
+//   - v18 及以前：只有 TotalStoragePowerReward 有值，其余三项为 "0"；
+//   - NV29(Solstice) 起：只有 TotalMintedReward / TotalBurnMinted / TotalExplicitMinted 有值，
+//     TotalStoragePowerReward 为 "0"。
+type RewardStream struct {
+	Epoch                   int64           `json:"Epoch"`
+	TotalStoragePowerReward decimal.Decimal `json:"TotalStoragePowerReward"`
+	TotalMintedReward       decimal.Decimal `json:"TotalMintedReward"`
+	TotalBurnMinted         decimal.Decimal `json:"TotalBurnMinted"`
+	TotalExplicitMinted     decimal.Decimal `json:"TotalExplicitMinted"`
+}
+
+// MinerMinted 返回该快照的「矿工实收」累计量（NV29 前后统一口径，与 RewardActorDetail.MinerMinted 同一套实现）。
+func (r RewardStream) MinerMinted() decimal.Decimal {
+	return minerMinted(r.TotalStoragePowerReward, r.TotalMintedReward, r.TotalBurnMinted, r.TotalExplicitMinted)
 }
 
 type ThisEpochSmoothed struct {

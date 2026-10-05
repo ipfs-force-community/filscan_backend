@@ -22,7 +22,7 @@ func NewBrowserBiz(agg londobell.Agg, adapter londobell.Adapter, db *gorm.DB, ab
 		BlockChainBiz:     NewBlockChainBiz(agg, adapter, db, conf),
 		AccountBiz:        NewAccountBiz(agg, adapter, db, conf),
 		RankBiz:           NewRankBiz(db, conf),
-		StatisticBiz:      NewStatisticBiz(db, adapter, conf),
+		StatisticBiz:      NewStatisticBiz(agg, db, adapter, conf),
 		FnsBiz:            NewFnsBiz(db, abiDecoder),
 		VerifyContractBiz: NewVerifyContract(agg, adapter, db, conf),
 		ContractBiz:       NewContract(db, agg, adapter, conf),

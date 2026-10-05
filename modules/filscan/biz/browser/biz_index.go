@@ -30,10 +30,10 @@ func NewIndexBiz(agg londobell.Agg, adapter londobell.Adapter, db *gorm.DB, conf
 	b := &IndexBiz{
 		baseFeeTrendDal: dal.NewGasPerTDal(db),
 		messageCountDal: dal.NewMessageCountTaskDal(db),
-		IndexAclImpl:    acl.NewIndexAclImpl(agg, adapter),
+		IndexAclImpl:    acl.NewIndexAclImpl(agg, adapter, dal.NewWinCountRewardDal(db)),
 		BlockChainBiz:   NewBlockChainBiz(agg, adapter, db, conf),
 		RankBiz:         NewRankBiz(db, conf),
-		StatisticBiz:    NewStatisticBiz(db, adapter, conf),
+		StatisticBiz:    NewStatisticBiz(agg, db, adapter, conf),
 		gasTrendRepo:    dal.NewGas24hTrendBizDal(db),
 		bannerRepo:      dal.NewBannerIndicatorDal(db),
 	}

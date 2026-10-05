@@ -166,6 +166,14 @@ type StatisticMessageCountTrendBizRepo interface {
 	GetMessageCountsByEpochs(ctx context.Context, points []chain.Epoch) (items []*bo.MessageCount, err error)
 }
 
+// WinCountReward 首页「每赢票奖励」实测口径（窗口 Δ矿工实收 ÷ Δ赢票数）的赢票数读实现。
+// 只读 chain.miner_win_counts（同步器 reward-task 写；本仓已有）。
+type WinCountReward interface {
+	// GetWinCountRewardStats 返回 [start, end) 内**去重后**的赢票总数，以及该区间内有赢票数据的高度数
+	// （供调用方算高度覆盖率：coveredEpochs / 窗口高度数）。区间左闭右开。
+	GetWinCountRewardStats(ctx context.Context, start, end chain.Epoch) (sumWinCount, coveredEpochs int64, err error)
+}
+
 type OwnerGetterRepo interface {
 	IsOwner(ctx context.Context, addr chain.SmartAddress) (ok bool, err error)
 }

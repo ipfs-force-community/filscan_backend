@@ -15,6 +15,7 @@ type StatisticAPI interface {
 	StatisticMessageCountTrend
 	StatisticGasDataTrend
 	StatisticDCTrend
+	StatisticRewardStreams
 	StatisticContractTrend
 	FilCompose(ctx context.Context, req FilComposeRequest) (resp FilComposeResponse, err error)
 	PeerMap(ctx context.Context, req PeerMapRequest) (resp PeerMapResponse, err error)
@@ -53,6 +54,12 @@ type StatisticGasDataTrend interface {
 
 type StatisticDCTrend interface {
 	DCTrend(ctx context.Context, req DCTrendRequest) (resp DCTrendResponse, err error)
+}
+
+// StatisticRewardStreams 「区块奖励流向」：按窗口展示 NV29/FIP-0118 之后
+// 区块奖励被拆成的矿工实收 / 服务流 / 销毁三股（数据＝ f02 计数器的相邻差分，不做权重建模）。
+type StatisticRewardStreams interface {
+	RewardStreams(ctx context.Context, req RewardStreamsRequest) (resp *RewardStreamsResponse, err error)
 }
 
 // -----------------------统计页接口参数结构-----------------------
@@ -281,4 +288,26 @@ type DCTrendItem struct {
 	BlockTime int64           `json:"block_time"`
 	Dc        decimal.Decimal `json:"dc"`
 	Cc        decimal.Decimal `json:"cc"`
+}
+
+// -----------------------区块奖励流向（NV29/FIP-0118）-----------------------//
+
+type RewardStreamsRequest struct {
+	Interval string `json:"interval"` // 时间间隔：24h / 7d / 30d
+}
+
+type RewardStreamsResponse struct {
+	Nv29Epoch int64               `json:"nv29_epoch"` // 本网 NV29 激活高度；未排期＝0（主网当前为 0）
+	Items     []*RewardStreamItem `json:"items"`      // 区块奖励流向列表
+}
+
+// RewardStreamItem 是「区块奖励流向」的一个数据点：相邻两个整点快照的计数器差分之和，
+// 三个分量与总和单位均为 FIL（decimal），total = miner + service + burn。
+type RewardStreamItem struct {
+	BlockTime int64           `json:"block_time"` // 区块时间（Unix 秒）
+	Epoch     int64           `json:"epoch"`
+	Miner     decimal.Decimal `json:"miner"`   // 矿工实收（共识流）
+	Service   decimal.Decimal `json:"service"` // 服务流（f02 内部记账，事后 Claim）
+	Burn      decimal.Decimal `json:"burn"`    // 销毁
+	Total     decimal.Decimal `json:"total"`   // 三者之和
 }
