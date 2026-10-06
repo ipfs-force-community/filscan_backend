@@ -239,8 +239,14 @@ func (v VerifyContractBiz) VerifyHardhatContract(ctx context.Context, request fi
 		if err1 != nil {
 			return resp, err1
 		}
+		securedName, nameErr := secureContractFilePath(fileDir, request.HardhatBuildInfoFile.FileName)
+		if nameErr != nil {
+			resp.IsVerified = false
+			err = nameErr
+			return
+		}
 		stdFile = &contract.SourceFile{
-			Name:    fileDir + request.HardhatBuildInfoFile.FileName,
+			Name:    securedName,
 			RawCode: string(marshal),
 		}
 	} else {
@@ -251,8 +257,14 @@ func (v VerifyContractBiz) VerifyHardhatContract(ctx context.Context, request fi
 	var metaDataFile *contract.SourceFile
 	var isMetaData bool
 	if request.MateDataFile != nil {
+		securedName, nameErr := secureContractFilePath(fileDir, request.MateDataFile.FileName)
+		if nameErr != nil {
+			resp.IsVerified = false
+			err = nameErr
+			return
+		}
 		metaDataFile = &contract.SourceFile{
-			Name:    fileDir + request.MateDataFile.FileName,
+			Name:    securedName,
 			RawCode: request.MateDataFile.SourceCode,
 		}
 		isMetaData = true
@@ -510,8 +522,14 @@ func (v VerifyContractBiz) VerifyContract(ctx context.Context, request filscan.V
 	var sourceFile []contract.SourceFile
 	if request.SourceFile != nil {
 		for _, file := range request.SourceFile {
+			securedName, nameErr := secureContractFilePath(fileDir, file.FileName)
+			if nameErr != nil {
+				resp.IsVerified = false
+				err = nameErr
+				return
+			}
 			sourceFile = append(sourceFile, contract.SourceFile{
-				Name:    fileDir + file.FileName,
+				Name:    securedName,
 				RawCode: file.SourceCode,
 			})
 		}
@@ -523,8 +541,14 @@ func (v VerifyContractBiz) VerifyContract(ctx context.Context, request filscan.V
 	var metaDataFile *contract.SourceFile
 	var isMetaData bool
 	if request.MateDataFile != nil {
+		securedName, nameErr := secureContractFilePath(fileDir, request.MateDataFile.FileName)
+		if nameErr != nil {
+			resp.IsVerified = false
+			err = nameErr
+			return
+		}
 		metaDataFile = &contract.SourceFile{
-			Name:    fileDir + request.MateDataFile.FileName,
+			Name:    securedName,
 			RawCode: request.MateDataFile.SourceCode,
 		}
 		isMetaData = true

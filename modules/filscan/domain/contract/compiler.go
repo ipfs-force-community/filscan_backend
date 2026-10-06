@@ -205,7 +205,7 @@ func (c *Compiler) CompileStandardJson(file *SourceFile, fileDir string) (compil
 			if err1 != nil {
 				return compiledFiles, err1
 			}
-			err = fmt.Errorf(string(marshal))
+			err = fmt.Errorf("%s", string(marshal))
 			return
 		}
 	}
@@ -251,7 +251,7 @@ func (c *Compiler) CompileStandardJsonWithTarget(file *SourceFile, fileDir strin
 			if err1 != nil {
 				return compiledFiles, err1
 			}
-			err = fmt.Errorf(string(marshal))
+			err = fmt.Errorf("%s", string(marshal))
 			return
 		}
 	}
@@ -390,7 +390,14 @@ func (c *Compiler) CompileWithMetaData(sourceFile []SourceFile, metaData MetaDat
 					splitKey := strings.Split(key, "/")
 					splitSource := strings.Split(file.Name, "/")
 					if splitSource[len(splitSource)-1] == splitKey[len(splitKey)-1] {
-						file.Name = fileDir + key
+						// key 来自用户提交的 metadata JSON 的 Sources，属不可信输入：
+						// 必须走同一套越界校验，否则这里是「任意文件写」的第二个入口。
+						secureName, secureErr := SecureJoin(fileDir, key)
+						if secureErr != nil {
+							err = secureErr
+							return
+						}
+						file.Name = secureName
 					}
 				}
 				err = c.CreatedSourceFile(file)
