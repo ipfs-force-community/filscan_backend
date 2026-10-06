@@ -158,21 +158,11 @@ SELECT *
 FROM fevm.evm_transfer_stats
 WHERE epoch = (SELECT max(epoch) FROM fevm.evm_transfer_stats WHERE interval = '1h')
 `
-	if filed != "" && sort != "" {
-		if filed == "transfer_count" {
-			filed = "acc_transfer_count"
-		}
-		if filed == "user_count" {
-			filed = "acc_user_count"
-		}
-		if filed == "gas_cost" {
-			filed = "acc_gas_cost"
-		}
-		order := fmt.Sprintf("ORDER BY %s %s\n", filed, sort)
-		sql = sql + order
-	} else {
-		sql = sql + "ORDER BY acc_transfer_count DESC\n"
+	order, err := buildOrderClause(filed, sort, evmTransferStatsOrderColumns, "acc_transfer_count", "desc")
+	if err != nil {
+		return
 	}
+	sql = sql + order
 
 	err = tx.Raw(sql).
 		Find(&transfers).Error
@@ -251,12 +241,11 @@ FROM (SELECT t.actor_id, t.actor_address, t.balance, fcs.contract_name
                     WHERE epoch > ?
                     GROUP BY actor_id) aet ON et.actor_id = aet.actor_id
 `
-	if filed != "" && sort != "" {
-		order := fmt.Sprintf("ORDER BY %s %s\n", filed, sort)
-		sql = sql + order
-	} else {
-		sql = sql + "ORDER BY transfer_count DESC\n"
+	order, err := buildOrderClause(filed, sort, evmTransferListOrderColumns, "transfer_count", "desc")
+	if err != nil {
+		return
 	}
+	sql = sql + order
 
 	err = tx.Raw(sql, chain.CurrentEpoch().CurrentDay()).
 		Find(&transfers).Error

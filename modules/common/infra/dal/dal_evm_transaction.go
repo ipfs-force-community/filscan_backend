@@ -57,21 +57,11 @@ SELECT *
 FROM fevm.evm_transaction_stats
 WHERE epoch = (SELECT max(epoch) FROM fevm.evm_transaction_stats WHERE interval = '1h')
 `
-	if filed != "" && sort != "" {
-		if filed == "transaction_count" {
-			filed = "acc_transaction_count"
-		}
-		if filed == "user_count" {
-			filed = "acc_user_count"
-		}
-		if filed == "gas_cost" {
-			filed = "acc_gas_cost"
-		}
-		order := fmt.Sprintf("ORDER BY %s %s\n", filed, sort)
-		sql = sql + order
-	} else {
-		sql = sql + "ORDER BY acc_transaction_count DESC\n"
+	order, err := buildOrderClause(filed, sort, evmTransactionStatsOrderColumns, "acc_transaction_count", "desc")
+	if err != nil {
+		return
 	}
+	sql = sql + order
 
 	err = tx.Raw(sql).
 		Find(&transactions).Error

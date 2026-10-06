@@ -2,7 +2,6 @@ package dal
 
 import (
 	"context"
-	"fmt"
 	"github.com/gozelle/pongo2"
 	"gitlab.forceup.in/fil-data-factory/filscan-backend/modules/common/infra/po"
 
@@ -36,30 +35,14 @@ func (o OwnerRankBizDal) GetOwnerRanks(ctx context.Context, epoch chain.Epoch, q
 
 	join := "left"
 	if query.Order != nil {
-		switch query.Order.Field {
-		case "quality_adj_power":
-			field = "a.quality_adj_power"
-		case "rewards_ratio_24h":
-			field = "b.reward_power_ratio"
-			join = "right"
-		case "power_change_24h":
-			field = "b.quality_adj_power_change"
-			join = "right"
-		case "block_count":
-			field = "b.acc_block_count"
-			join = "right"
-		default:
-			err = fmt.Errorf("unsupported order field: %s", query.Order.Field)
+		field, order, err = resolveOrder(query.Order.Field, query.Order.Sort, ownerRankOrderColumns, field, order)
+		if err != nil {
 			return
 		}
-		switch query.Order.Sort {
-		case "desc":
-			order = "desc"
-		case "asc":
-			order = "asc"
-		default:
-			err = fmt.Errorf("unsupported order: %s", query.Order.Sort)
-			return
+		// 以下字段取自 chain.owner_stats（join 侧），需要 right join 才不会丢行。
+		switch query.Order.Field {
+		case "rewards_ratio_24h", "power_change_24h", "block_count":
+			join = "right"
 		}
 	}
 
