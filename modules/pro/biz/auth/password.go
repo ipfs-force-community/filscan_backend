@@ -17,7 +17,6 @@ var (
 )
 
 const (
-	Secret              = "cocacola"
 	BearerContextKey    = "bearer"
 	UserResourcePermKey = "ResourcePerm"
 )

@@ -19,7 +19,6 @@ type Bearer struct {
 type ck string
 
 const contextKey ck = "bearer"
-const secret = "12345678"
 
 var whiteList = map[string]struct{}{
 	"/pro/v1/Login":                  {},
@@ -44,10 +43,18 @@ func UseBearer(ctx context.Context) *Bearer {
 	return v
 }
 
-func Authentication() gin.HandlerFunc {
+// Authentication 用配置注入的密钥验签 /pro 路由组的 JWT。
+// 必须 fail-closed：secret 为空时，除白名单外的请求一律 401，
+// 绝不允许用空密钥验签（否则任何人都能自签 token 通过）。
+func Authentication(secret string) gin.HandlerFunc {
 	return func(c *gin.Context) {
 
 		if _, ok := whiteList[c.Request.URL.Path]; ok {
+			return
+		}
+
+		if secret == "" {
+			c.AbortWithStatus(http.StatusUnauthorized)
 			return
 		}
 

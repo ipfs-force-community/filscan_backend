@@ -73,7 +73,13 @@ func newApp(conf *config.Config, adapter londobell.Adapter, fullApi filscan.Brow
 		c.Request = c.Request.WithContext(ctx)
 	}), "v1", fullApi)
 
-	server.RegisterAPI(server.Group("/pro", _app.Cors(), bearer.Authentication(), wrapCustomError(), vip.AuthenticationWithVIP(db, redis)), "v1", proApi)
+	// /pro 路由组的 JWT 验签密钥取自配置（[pro].jwt_secret），不再硬编码。
+	// conf.Pro 可缺省；缺省时密钥为空，bearer.Authentication 会 fail-closed（非白名单 401）。
+	proJwtSecret := ""
+	if conf.Pro != nil {
+		proJwtSecret = conf.Pro.JwtSecret
+	}
+	server.RegisterAPI(server.Group("/pro", _app.Cors(), bearer.Authentication(proJwtSecret), wrapCustomError(), vip.AuthenticationWithVIP(db, redis)), "v1", proApi)
 
 	//server.RegisterAPI(server.Group("/api/cron"), "v1", cronApi)
 	return server.Engine
