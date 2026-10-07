@@ -184,12 +184,22 @@ func (i *IndexBiz) getTotalIndicators(ctx context.Context, req filscan.TotalIndi
 		rewardEfficiency24H = rewardIncrease24H.Div(netPower.QualityPower).Mul(decimal.NewFromInt(1024).Pow(decimal.NewFromInt(4)))
 	}
 
-	// 获取每赢票奖励
+	// 获取每赢票奖励 + 近24h奖励三流明细：**同一次** reward_streams 取数（首页对 aggregator 只调 1 次）。
 	var winCountReward decimal.Decimal
-	winCountReward, err = i.GetWinCountReward(ctx, epoch)
+	var rewardStreamDeltas acl.RewardStreamDeltas24H
+	winCountReward, rewardStreamDeltas, err = i.GetHomeRewardStreams24H(ctx, epoch)
 	if err != nil {
 		log.Errorf("winCountReward: %s", err.Error())
 	}
+
+	// 近24h奖励三流（兜底：快照不足/取数失败 ⇒ 四者置 0，首页不 500、不 panic）。
+	rewardStreamMiner24H, rewardStreamService24H, rewardStreamBurn24H, rewardStreamTotal24H := rewardStreamIndicators24H(rewardStreamDeltas)
+	if !rewardStreamDeltas.OK {
+		log.Warnf("reward_streams: 近24h三流明细不可用（快照不足/取数失败 err=%v），首页置 0", err)
+	}
+
+	// NV29(Solstice) 激活高度；未排期/<=0 ⇒ 0（前端据此不画 NV29 竖线）。
+	nv29Epoch := nv29EpochOrZero(message_detail.UpgradeSolsticeHeight.Int64())
 
 	// 获取近24h平均每高度区块数
 	var avgBlockCount decimal.Decimal
@@ -281,19 +291,25 @@ func (i *IndexBiz) getTotalIndicators(ctx context.Context, req filscan.TotalIndi
 		PowerIncrease24H:   powerIncrease24H,
 		RewardsIncrease24H: rewardIncrease24H,
 		FilPerTera24H:      rewardEfficiency24H,
-		WinCountReward:     winCountReward,
-		AvgBlockCount:      avgBlockCount,
-		AvgMessageCount:    avgMessageCount,
-		ActiveMiners:       activeMiner,
-		Burnt:              burnt,
-		CirculatingPercent: circulatingPercent,
-		GasIn32G:           gasCost32G,
-		AddPowerIn32G:      addPower32G,
-		GasIn64G:           gasCost64G,
-		AddPowerIn64G:      addPower64G,
-		Sum:                sum,
-		ContractGas:        contractGas,
-		Others:             sum.Sub(contractGas),
+		// 近24h奖励三流明细（单次取数；fil_per_tera_24h 仍为单数字不拆）。
+		RewardStreamMiner24H:   rewardStreamMiner24H,
+		RewardStreamService24H: rewardStreamService24H,
+		RewardStreamBurn24H:    rewardStreamBurn24H,
+		RewardStreamTotal24H:   rewardStreamTotal24H,
+		NV29Epoch:              nv29Epoch,
+		WinCountReward:         winCountReward,
+		AvgBlockCount:          avgBlockCount,
+		AvgMessageCount:        avgMessageCount,
+		ActiveMiners:           activeMiner,
+		Burnt:                  burnt,
+		CirculatingPercent:     circulatingPercent,
+		GasIn32G:               gasCost32G,
+		AddPowerIn32G:          addPower32G,
+		GasIn64G:               gasCost64G,
+		AddPowerIn64G:          addPower64G,
+		Sum:                    sum,
+		ContractGas:            contractGas,
+		Others:                 sum.Sub(contractGas),
 	}
 
 	// NV29(FIP-0118) 之后 FIL+ 已冻结：dc 归零、cc = raw（质量增益不再等于 datacap 算力）。
@@ -416,4 +432,14 @@ func (i *IndexBiz) SearchInfo(ctx context.Context, req filscan.SearchInfoRequest
 
 	// 返回404
 	return
+}
+
+// rewardStreamIndicators24H 把 acl 的三流增量映射成首页四个金额字段。
+// 兜底：deltas.OK=false（快照不足/取数失败）⇒ 四者全 0（首页不 500、不 panic）。
+// 纯函数，便于单测覆盖「调用方置 0」这条路径。
+func rewardStreamIndicators24H(deltas acl.RewardStreamDeltas24H) (miner, service, burn, total decimal.Decimal) {
+	if !deltas.OK {
+		return decimal.Zero, decimal.Zero, decimal.Zero, decimal.Zero
+	}
+	return deltas.Miner, deltas.Service, deltas.Burn, deltas.Total
 }

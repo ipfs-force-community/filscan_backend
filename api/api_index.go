@@ -62,17 +62,24 @@ type TotalIndicators struct {
 	PowerIncrease24H   decimal.Decimal `json:"power_increase_24h"`   // 近24h增长算力
 	RewardsIncrease24H decimal.Decimal `json:"rewards_increase_24h"` // 近24h出块奖励
 	FilPerTera24H      decimal.Decimal `json:"fil_per_tera_24h"`     // 近24h产出效率，单位Fil/T
-	GasIn32G           decimal.Decimal `json:"gas_in_32g"`           // 32GiB扇区Gas消耗，单位Fil/T
-	AddPowerIn32G      decimal.Decimal `json:"add_power_in_32g"`     // 32GiB扇区新增算力成本，单位Fil/T
-	GasIn64G           decimal.Decimal `json:"gas_in_64g"`           // 64GiB扇区Gas消耗，单位Fil/T
-	AddPowerIn64G      decimal.Decimal `json:"add_power_in_64g"`     // 64GiB扇区新增算力成本，单位Fil/T
-	WinCountReward     decimal.Decimal `json:"win_count_reward"`     // 每赢票奖励，单位Fil
-	AvgBlockCount      decimal.Decimal `json:"avg_block_count"`      // 平均每高度区块数量
-	AvgMessageCount    float64         `json:"avg_message_count"`    // 平均每高度消息数
-	ActiveMiners       int64           `json:"active_miners"`        // 活跃节点数
-	Burnt              decimal.Decimal `json:"burnt"`                // 销毁量
-	CirculatingPercent decimal.Decimal `json:"circulating_percent"`  // 流通率
-	Sum                decimal.Decimal `json:"sum"`
-	ContractGas        decimal.Decimal `json:"contract_gas"`
-	Others             decimal.Decimal `json:"others"`
+	// 近24h区块奖励三流拆分（NV29/FIP-0118，attoFIL 原始计数器差分；fil_per_tera_24h 仍为单数字不拆）。
+	// 口径见 acl.RewardStreamDeltas24H；取数失败时四者置 0。
+	RewardStreamMiner24H   decimal.Decimal `json:"reward_stream_miner_24h"`   // 近24h共识流＝矿工实收
+	RewardStreamService24H decimal.Decimal `json:"reward_stream_service_24h"` // 近24h服务流
+	RewardStreamBurn24H    decimal.Decimal `json:"reward_stream_burn_24h"`    // 近24h销毁
+	RewardStreamTotal24H   decimal.Decimal `json:"reward_stream_total_24h"`   // 近24h铸造量合计
+	NV29Epoch              int64           `json:"nv29_epoch"`                // NV29 激活高度；<=0/未排期 表示本网未激活
+	GasIn32G               decimal.Decimal `json:"gas_in_32g"`                // 32GiB扇区Gas消耗，单位Fil/T
+	AddPowerIn32G          decimal.Decimal `json:"add_power_in_32g"`          // 32GiB扇区新增算力成本，单位Fil/T
+	GasIn64G               decimal.Decimal `json:"gas_in_64g"`                // 64GiB扇区Gas消耗，单位Fil/T
+	AddPowerIn64G          decimal.Decimal `json:"add_power_in_64g"`          // 64GiB扇区新增算力成本，单位Fil/T
+	WinCountReward         decimal.Decimal `json:"win_count_reward"`          // 每赢票奖励，单位Fil
+	AvgBlockCount          decimal.Decimal `json:"avg_block_count"`           // 平均每高度区块数量
+	AvgMessageCount        float64         `json:"avg_message_count"`         // 平均每高度消息数
+	ActiveMiners           int64           `json:"active_miners"`             // 活跃节点数
+	Burnt                  decimal.Decimal `json:"burnt"`                     // 销毁量
+	CirculatingPercent     decimal.Decimal `json:"circulating_percent"`       // 流通率
+	Sum                    decimal.Decimal `json:"sum"`
+	ContractGas            decimal.Decimal `json:"contract_gas"`
+	Others                 decimal.Decimal `json:"others"`
 }

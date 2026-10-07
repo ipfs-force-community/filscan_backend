@@ -56,19 +56,19 @@ func (a IndexAclImpl) GetEpoch(ctx context.Context, epoch chain.Epoch) (*londobe
 }
 
 func (a IndexAclImpl) GetAggLatestTipset(ctx context.Context) (tipset *londobell.Tipset, err error) {
-	
+
 	tipsets, err := a.agg.LatestTipset(ctx)
 	if err != nil {
 		return
 	}
-	
+
 	if len(tipsets) > 0 {
 		tipset = tipsets[0]
 	} else {
 		err = fmt.Errorf("agg latest tipset is empty")
 		return
 	}
-	
+
 	return
 }
 
@@ -86,7 +86,7 @@ func (a IndexAclImpl) GetAggLatestTipset(ctx context.Context) (tipset *londobell
 //}
 
 func (a IndexAclImpl) GetPowerIncrease24H(ctx context.Context, epoch chain.Epoch) (powerIncrease24H decimal.Decimal, err error) {
-	
+
 	end := epoch - 2880
 	startPowerState, err := a.GetTotalEpochPower(ctx, epoch)
 	if err != nil {
@@ -110,12 +110,12 @@ func (a IndexAclImpl) GetTotalEpochPower(ctx context.Context, epoch chain.Epoch)
 		err = fmt.Errorf("epoch: %d(%s) agg get f04 is emtpy", epoch.Int64(), epoch.Format())
 		return
 	}
-	
+
 	actorState, err := json.Marshal(actors.State)
 	if err != nil {
 		return
 	}
-	
+
 	powerDetail = new(londobell.PowerActorDetail)
 	err = json.Unmarshal(actorState, &powerDetail)
 	if err != nil {
@@ -150,18 +150,18 @@ func (a IndexAclImpl) GetTotalEpochReward(ctx context.Context, epoch chain.Epoch
 		err = fmt.Errorf("agg get actor f02 is empty")
 		return
 	}
-	
+
 	actorState, err := json.Marshal(actors.State)
 	if err != nil {
 		return
 	}
-	
+
 	rewardDetail = new(londobell.RewardActorDetail)
 	err = json.Unmarshal(actorState, &rewardDetail)
 	if err != nil {
 		return
 	}
-	
+
 	return
 }
 
@@ -172,7 +172,65 @@ const winCountRewardWindowEpochs int64 = 2880
 // 回退旧口径（拆分前毛值）并打 WARN，而不是拿不完整的赢票数去算一个偏高的每赢票奖励。
 const winCountRewardMinCoverage = 0.9
 
-// GetWinCountReward 首页「每赢票奖励」。
+// RewardStreamDeltas24H 首页「近24h奖励三流」增量（attoFIL）。
+//
+// 全部取自 contract A /aggregators/reward_streams 窗口内整点快照的**首尾两行计数器差**：
+//   - Miner   = ΔMinerMinted（NV29 起 = ΔTotalMintedReward − ΔTotalBurnMinted − ΔTotalExplicitMinted；
+//     升级前即 ΔTotalStoragePowerReward）；
+//   - Service = ΔTotalExplicitMinted（升级前恒 0）；Burn = ΔTotalBurnMinted（升级前恒 0）；
+//   - Total   = ΔTotalMintedReward。NV29 起满足 Miner = Total − Service − Burn。
+//
+// OK=false 表示序列不足两行 / 首尾同一高度 / 全为空；此时四个金额均为零值，调用方按「无数据」处理。
+type RewardStreamDeltas24H struct {
+	Miner   decimal.Decimal
+	Service decimal.Decimal
+	Burn    decimal.Decimal
+	Total   decimal.Decimal
+	OK      bool
+}
+
+// rewardStreamDeltas24H 纯函数：由整点快照序列算首尾差分。任一端缺失 / 不足两行 / 首尾同高 ⇒ OK=false。
+// 契约 A 已按 Epoch 升序返回，这里仍先排序再取首尾，避免上游顺序变化时取错端点。
+func rewardStreamDeltas24H(streams []*londobell.RewardStream) RewardStreamDeltas24H {
+	valid := make([]*londobell.RewardStream, 0, len(streams))
+	for _, s := range streams {
+		if s != nil {
+			valid = append(valid, s)
+		}
+	}
+	if len(valid) < 2 {
+		return RewardStreamDeltas24H{}
+	}
+	sort.Slice(valid, func(i, j int) bool { return valid[i].Epoch < valid[j].Epoch })
+	first, last := valid[0], valid[len(valid)-1]
+	if first.Epoch == last.Epoch {
+		return RewardStreamDeltas24H{}
+	}
+	return RewardStreamDeltas24H{
+		Miner:   last.MinerMinted().Sub(first.MinerMinted()),
+		Service: last.TotalExplicitMinted.Sub(first.TotalExplicitMinted),
+		Burn:    last.TotalBurnMinted.Sub(first.TotalBurnMinted),
+		Total:   last.TotalMintedReward.Sub(first.TotalMintedReward),
+		OK:      true,
+	}
+}
+
+// rewardStreamsWindow 取首页 24h 窗口 [T-2880, T] 的整点快照（end = T+1，把链头这一行也取进来）。
+// 抽出来给 GetWinCountReward / GetRewardStreamDeltas24H / GetHomeRewardStreams24H 共用，
+// 以保证首页一次请求对 aggregator 的 reward_streams 只调用一次。
+func (a IndexAclImpl) rewardStreamsWindow(ctx context.Context, epoch chain.Epoch) ([]*londobell.RewardStream, error) {
+	start := epoch - chain.Epoch(winCountRewardWindowEpochs)
+	return a.agg.RewardStreams(ctx, start, epoch.Next())
+}
+
+// GetWinCountReward 首页「每赢票奖励」（薄封装）：先取一次 24h 奖励流快照，再交给
+// winCountRewardFromStreams 复用取数结果。签名与全部兜底行为保持不变（测试/其它调用方沿用）。
+func (a IndexAclImpl) GetWinCountReward(ctx context.Context, epoch chain.Epoch) (result decimal.Decimal, err error) {
+	streams, streamsErr := a.rewardStreamsWindow(ctx, epoch)
+	return a.winCountRewardFromStreams(ctx, epoch, streams, streamsErr)
+}
+
+// winCountRewardFromStreams 用已取好的整点快照算「每赢票奖励」（取数错误经 streamsErr 传入，不重复取数）。
 //
 // 实测口径：窗口内 Δ矿工实收 ÷ Δ赢票数，窗口＝最近 24h（2880 epoch）。
 //   - Δ矿工实收 = f02 在 [T-2880, T] 两时点 MinerMinted() 之差，状态经 contract A 新接口
@@ -180,13 +238,12 @@ const winCountRewardMinCoverage = 0.9
 //   - Δ赢票数 = PG chain.miner_win_counts 在 [T-2880, T) 内去重后的赢票总数。
 //
 // 兜底（都必须打日志，且**首页不得 500**）：
-//   - 分母为 0 → 返回 0；
 //   - 两时点计数器缺失 / 接口失败 → 回退旧口径 ThisEpochReward/5 + WARN；
+//   - 分母为 0 → 返回 0；
 //   - 窗口高度覆盖率 < 90% → 回退旧口径 + WARN。
-func (a IndexAclImpl) GetWinCountReward(ctx context.Context, epoch chain.Epoch) (result decimal.Decimal, err error) {
+func (a IndexAclImpl) winCountRewardFromStreams(ctx context.Context, epoch chain.Epoch, streams []*londobell.RewardStream, streamsErr error) (result decimal.Decimal, err error) {
 	start := epoch - chain.Epoch(winCountRewardWindowEpochs)
 
-	streams, streamsErr := a.agg.RewardStreams(ctx, start, epoch.Next())
 	minerDelta, deltaOK := minerMintedDelta(streams)
 	if streamsErr != nil || !deltaOK {
 		log.Warnf("win_count_reward: reward_streams [%d,%d) 取数失败或首尾计数器缺失 (err=%v ok=%v)，回退旧口径 ThisEpochReward/5",
@@ -217,25 +274,32 @@ func (a IndexAclImpl) GetWinCountReward(ctx context.Context, epoch chain.Epoch) 
 	return result, nil
 }
 
+// GetRewardStreamDeltas24H 取一次 24h 奖励流快照并算三流增量（首尾差分）。供首页/统计复用。
+// 取数失败时返回零值 deltas（OK=false）与非 nil error，调用方按「无数据」处理。
+func (a IndexAclImpl) GetRewardStreamDeltas24H(ctx context.Context, epoch chain.Epoch) (RewardStreamDeltas24H, error) {
+	streams, err := a.rewardStreamsWindow(ctx, epoch)
+	return rewardStreamDeltas24H(streams), err
+}
+
+// GetHomeRewardStreams24H 首页专用：**单次**取 24h 奖励流快照，同时产出「每赢票奖励」与三流明细，
+// 保证首页一次请求对 aggregator 的 reward_streams 调用次数恒为 1（不因新增三流字段翻倍）。
+//   - winCountReward 的兜底与 GetWinCountReward 完全一致（失败时 err 非 nil，由 biz 记日志）；
+//   - deltas.OK=false（快照不足/取数失败）时四个金额为零值，由 biz 置 0，首页不 500、不 panic。
+func (a IndexAclImpl) GetHomeRewardStreams24H(ctx context.Context, epoch chain.Epoch) (winCountReward decimal.Decimal, deltas RewardStreamDeltas24H, err error) {
+	streams, streamsErr := a.rewardStreamsWindow(ctx, epoch)
+	deltas = rewardStreamDeltas24H(streams)
+	winCountReward, err = a.winCountRewardFromStreams(ctx, epoch, streams, streamsErr)
+	return
+}
+
 // minerMintedDelta 返回奖励流序列首尾两行的「矿工实收」增量（attoFIL）。
 // 任一端缺失 / 序列不足两行 / 首尾同一高度 ⇒ ok=false（调用方回退旧口径）。
-// 契约 A 已按 Epoch 升序返回，这里仍先排序再取首尾，避免上游顺序变化时取错端点。
 func minerMintedDelta(streams []*londobell.RewardStream) (delta decimal.Decimal, ok bool) {
-	valid := make([]*londobell.RewardStream, 0, len(streams))
-	for _, s := range streams {
-		if s != nil {
-			valid = append(valid, s)
-		}
-	}
-	if len(valid) < 2 {
+	d := rewardStreamDeltas24H(streams)
+	if !d.OK {
 		return decimal.Zero, false
 	}
-	sort.Slice(valid, func(i, j int) bool { return valid[i].Epoch < valid[j].Epoch })
-	first, last := valid[0], valid[len(valid)-1]
-	if first.Epoch == last.Epoch {
-		return decimal.Zero, false
-	}
-	return last.MinerMinted().Sub(first.MinerMinted()), true
+	return d.Miner, true
 }
 
 // legacyWinCountReward 旧口径：f02 当前 ThisEpochReward / 5。
