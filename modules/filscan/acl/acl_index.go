@@ -281,15 +281,27 @@ func (a IndexAclImpl) GetRewardStreamDeltas24H(ctx context.Context, epoch chain.
 	return rewardStreamDeltas24H(streams), err
 }
 
+// HomeRewardStreams24H 首页「近24h奖励」一次取数的产物：每赢票奖励 + 三流明细。
+//
+// ⚠️ 为什么包成结构体而不直接返回两个值：BrowserBiz 会被 go-jsonrpc 反射注册成
+// JSON-RPC 方法集，而 go-jsonrpc 的 processFuncOut（go-jsonrpc/util.go）只允许 0/1/2 个
+// 返回值（2 个时第二个必须是 error）——3 个返回值会在**进程启动时 panic**，
+// 编译不报错、单测也照样通过（实测踩过：cali 换件时新二进制启动即 exit 2）。
+type HomeRewardStreams24H struct {
+	WinCountReward decimal.Decimal
+	Deltas         RewardStreamDeltas24H
+}
+
 // GetHomeRewardStreams24H 首页专用：**单次**取 24h 奖励流快照，同时产出「每赢票奖励」与三流明细，
 // 保证首页一次请求对 aggregator 的 reward_streams 调用次数恒为 1（不因新增三流字段翻倍）。
 //   - winCountReward 的兜底与 GetWinCountReward 完全一致（失败时 err 非 nil，由 biz 记日志）；
 //   - deltas.OK=false（快照不足/取数失败）时四个金额为零值，由 biz 置 0，首页不 500、不 panic。
-func (a IndexAclImpl) GetHomeRewardStreams24H(ctx context.Context, epoch chain.Epoch) (winCountReward decimal.Decimal, deltas RewardStreamDeltas24H, err error) {
+func (a IndexAclImpl) GetHomeRewardStreams24H(ctx context.Context, epoch chain.Epoch) (HomeRewardStreams24H, error) {
 	streams, streamsErr := a.rewardStreamsWindow(ctx, epoch)
-	deltas = rewardStreamDeltas24H(streams)
-	winCountReward, err = a.winCountRewardFromStreams(ctx, epoch, streams, streamsErr)
-	return
+	res := HomeRewardStreams24H{Deltas: rewardStreamDeltas24H(streams)}
+	wc, err := a.winCountRewardFromStreams(ctx, epoch, streams, streamsErr)
+	res.WinCountReward = wc
+	return res, err
 }
 
 // minerMintedDelta 返回奖励流序列首尾两行的「矿工实收」增量（attoFIL）。

@@ -127,7 +127,8 @@ func TestGetHomeRewardStreams24HSingleAggCall(t *testing.T) {
 	a := newTestAcl(agg, adapter, repo)
 
 	const epoch chain.Epoch = 6429840
-	wc, d, err := a.GetHomeRewardStreams24H(context.Background(), epoch)
+	hs, err := a.GetHomeRewardStreams24H(context.Background(), epoch)
+	wc, d := hs.WinCountReward, hs.Deltas
 	if err != nil {
 		t.Fatalf("不应报错: %s", err)
 	}
@@ -157,7 +158,8 @@ func TestGetHomeRewardStreams24HAggErrorFallsBack(t *testing.T) {
 	repo := &fakeWinCountRepo{sum: 1000, covered: 2880}
 	a := newTestAcl(agg, adapter, repo)
 
-	wc, d, err := a.GetHomeRewardStreams24H(context.Background(), 6429840)
+	hs, err := a.GetHomeRewardStreams24H(context.Background(), 6429840)
+	wc, d := hs.WinCountReward, hs.Deltas
 	if err != nil {
 		t.Fatalf("旧口径可用时不应报错: %s", err)
 	}

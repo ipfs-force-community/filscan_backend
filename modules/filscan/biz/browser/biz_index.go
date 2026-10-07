@@ -187,7 +187,8 @@ func (i *IndexBiz) getTotalIndicators(ctx context.Context, req filscan.TotalIndi
 	// 获取每赢票奖励 + 近24h奖励三流明细：**同一次** reward_streams 取数（首页对 aggregator 只调 1 次）。
 	var winCountReward decimal.Decimal
 	var rewardStreamDeltas acl.RewardStreamDeltas24H
-	winCountReward, rewardStreamDeltas, err = i.GetHomeRewardStreams24H(ctx, epoch)
+	homeStreams, err := i.GetHomeRewardStreams24H(ctx, epoch)
+	winCountReward, rewardStreamDeltas = homeStreams.WinCountReward, homeStreams.Deltas
 	if err != nil {
 		log.Errorf("winCountReward: %s", err.Error())
 	}
