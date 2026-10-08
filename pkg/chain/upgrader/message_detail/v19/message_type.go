@@ -456,3 +456,88 @@ type UpgradeSectorQuality struct {
 	Sectors       string
 	NewExpiration *int64
 }
+
+// ===== NV29(Solstice / FIP-0118) 奖励流方法（f02 的 9 个 FRC 方法）=====
+//
+// 类型与字段名以 go-state-types v0.19.0 builtin/v19/reward（reward_types.go / streams.go）为准。
+// 对外一律把地址/金额转成字符串、把枚举转成整数，与既有 converter 风格一致。
+
+// WeightRecord 是权重记录（Denom=1e18 定点）。
+type WeightRecord struct {
+	VStart uint64
+	Slope  int64
+	TStart int64
+	Floor  uint64
+	Cap    uint64
+}
+
+// WeightRecordUpdate 是 SetWeightRecords / StepWeightRecords 里对一条流的权重替换。
+type WeightRecordUpdate struct {
+	ID     uint64
+	Weight WeightRecord
+}
+
+type SetWeightRecordsParams struct {
+	Updates []WeightRecordUpdate
+}
+
+type StepWeightRecordsParams struct {
+	Updates []WeightRecordUpdate
+}
+
+// RecipientShare 是显式流份额表里的一项（Share 为 Denom 定点）。
+type RecipientShare struct {
+	Recipient string
+	Share     uint64
+}
+
+// DistributionInit 是显式流的初始分配（Writer + 完整份额表）。
+type DistributionInit struct {
+	Writer string
+	Shares []RecipientShare
+}
+
+// RegisterStreamParams 注册一条流；Distribution 为 nil 表示隐式流（矿工共识流）。
+type RegisterStreamParams struct {
+	ID              uint64
+	Weight          WeightRecord
+	Distribution    *DistributionInit
+	ActivationEpoch int64
+}
+
+type RemoveStreamParams struct {
+	ID uint64
+}
+
+type SetDistributionParams struct {
+	ID     uint64
+	Writer string
+}
+
+type SetSharesParams struct {
+	ID     uint64
+	Shares []RecipientShare
+}
+
+type ReplaceAddressParams struct {
+	ID         uint64
+	OldAddress string
+	NewAddress string
+}
+
+// CancelPendingParams 取消一条排队写入；ID 为 nil 表示日程级（SetWeightRecords）。
+type CancelPendingParams struct {
+	ID *uint64
+	Op uint8
+}
+
+// ClaimParams 提取请求：流 ID + 钱包列表（按序对应 ClaimReturn.Amounts）。
+type ClaimParams struct {
+	ID      uint64
+	Wallets []string
+}
+
+// ClaimReturn 提取返回：与 ClaimParams.Wallets 等长、按序对应的金额（attoFIL，无法支付的为 "0"）。
+type ClaimReturn struct {
+	Amounts []string
+}

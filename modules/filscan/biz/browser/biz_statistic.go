@@ -12,17 +12,19 @@ import (
 )
 
 func NewStatisticBiz(agg londobell.Agg, db *gorm.DB, adapter londobell.Adapter, conf *config.Config) *StatisticBiz {
+	statisticAcl := acl.NewStatisticAclImpl(adapter)
 	return &StatisticBiz{
-		StatisticBaseLineBiz:          NewStatisticBaseLineBiz(dal.NewSyncerDal(db), dal.NewStatisticBaseLineBizDal(db), dal.NewMinerGetterDal(db), adapter),
-		BaseFeeTrendBiz:               NewBaseFeeTrendBiz(dal.NewSyncerDal(db), dal.NewBaseFeeTrendBizDal(db)),
-		ContractTrendBiz:              NewContractTrendBiz(dal.NewSyncerDal(db), dal.NewContractTrendBizDal(db), conf),
-		StatisticActiveMinerTrendBiz:  NewStatisticActiveMinerTrendBiz(dal.NewSyncEpochGetterDal(db), dal.NewStatisticActiveMinerTrendBizDal(db)),
-		StatisticBlockRewardTrendBiz:  NewStatisticBlockRewardTrendBiz(dal.NewSyncerDal(db), dal.NewStatisticBlockRewardTrendBizDal(db)),
-		StatisticMessageCountTrendBiz: NewStatisticMessageCountTrendBiz(dal.NewSyncerDal(db), dal.NewStatisticMessageCountTrendBizDal(db)),
-		StatisticGasDataTrend:         NewStatisticGasDataTrendBiz(dal.NewGas24hTrendBizDal(db)),
-		StatisticDcTrendBiz:           NewStatisticDcTrendBiz(dal.NewSyncerDal(db), dal.NewDcTrendDal(db)),
-		StatisticRewardStreamsBiz:     NewStatisticRewardStreamsBiz(dal.NewSyncerDal(db), agg),
-		adapter:                       acl.NewStatisticAclImpl(adapter),
+		StatisticBaseLineBiz:           NewStatisticBaseLineBiz(dal.NewSyncerDal(db), dal.NewStatisticBaseLineBizDal(db), dal.NewMinerGetterDal(db), adapter),
+		BaseFeeTrendBiz:                NewBaseFeeTrendBiz(dal.NewSyncerDal(db), dal.NewBaseFeeTrendBizDal(db)),
+		ContractTrendBiz:               NewContractTrendBiz(dal.NewSyncerDal(db), dal.NewContractTrendBizDal(db), conf),
+		StatisticActiveMinerTrendBiz:   NewStatisticActiveMinerTrendBiz(dal.NewSyncEpochGetterDal(db), dal.NewStatisticActiveMinerTrendBizDal(db)),
+		StatisticBlockRewardTrendBiz:   NewStatisticBlockRewardTrendBiz(dal.NewSyncerDal(db), dal.NewStatisticBlockRewardTrendBizDal(db)),
+		StatisticMessageCountTrendBiz:  NewStatisticMessageCountTrendBiz(dal.NewSyncerDal(db), dal.NewStatisticMessageCountTrendBizDal(db)),
+		StatisticGasDataTrend:          NewStatisticGasDataTrendBiz(dal.NewGas24hTrendBizDal(db)),
+		StatisticDcTrendBiz:            NewStatisticDcTrendBiz(dal.NewSyncerDal(db), dal.NewDcTrendDal(db)),
+		StatisticRewardStreamsBiz:      NewStatisticRewardStreamsBiz(dal.NewSyncerDal(db), agg),
+		StatisticRewardStreamLedgerBiz: NewStatisticRewardStreamLedgerBiz(dal.NewSyncerDal(db), statisticAcl),
+		adapter:                        statisticAcl,
 	}
 }
 
@@ -37,6 +39,7 @@ type StatisticBiz struct {
 	*StatisticGasDataTrend
 	*StatisticDcTrendBiz
 	*StatisticRewardStreamsBiz
+	*StatisticRewardStreamLedgerBiz
 	*ContractTrendBiz
 	adapter *acl.StatisticAclImpl
 }

@@ -11,6 +11,8 @@ import (
 
 type AdapterStatisticAcl interface {
 	CurrentSectorInitialPledge(ctx context.Context, epoch *chain.Epoch) (*londobell.CurrentSectorInitialPledge, error)
+	// RewardStreamLedger 取 f02 奖励 actor 的 NV29 服务流账本（londobell /adapter/reward_stream_ledger，契约 §8.1）。
+	RewardStreamLedger(ctx context.Context, epoch *chain.Epoch) (*londobell.RewardStreamLedger, error)
 }
 
 func NewStatisticAclImpl(adapter AdapterStatisticAcl) *StatisticAclImpl {
@@ -19,6 +21,11 @@ func NewStatisticAclImpl(adapter AdapterStatisticAcl) *StatisticAclImpl {
 
 type StatisticAclImpl struct {
 	adapter AdapterStatisticAcl
+}
+
+// GetRewardStreamLedger 直通节点侧账本端点（本仓不手搓 CBOR / 不重算 actor 逻辑）。
+func (s StatisticAclImpl) GetRewardStreamLedger(ctx context.Context, epoch *chain.Epoch) (*londobell.RewardStreamLedger, error) {
+	return s.adapter.RewardStreamLedger(ctx, epoch)
 }
 
 func (s StatisticAclImpl) GetFilCompose(ctx context.Context) (filCompose filscan.FilCompose, err error) {

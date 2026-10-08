@@ -291,3 +291,22 @@ func (l LondobellAdapterImpl) ActiveSectors(ctx context.Context, miner chain.Sma
 
 	return
 }
+
+// RewardStreamLedger 取 f02 奖励 actor 的 NV29 服务流账本（契约 §8.1）。epoch 为 nil 时节点取链头。
+// v18 时节点返回 nv29=false、streams=[]，属正常响应（不是错误）。
+func (l LondobellAdapterImpl) RewardStreamLedger(ctx context.Context, epoch *chain.Epoch) (ledger *londobell.RewardStreamLedger, err error) {
+	body := map[string]interface{}{}
+	if epoch != nil {
+		body["epoch"] = epoch.Int64()
+	}
+	resp, err := l.exec(ctx, "/adapter/reward_stream_ledger", body)
+	if err != nil {
+		return
+	}
+	ledger = new(londobell.RewardStreamLedger)
+	err = l.bindResult(resp, ledger)
+	if err != nil {
+		return
+	}
+	return
+}

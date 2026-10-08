@@ -13,6 +13,7 @@ import (
 	"github.com/filecoin-project/go-state-types/builtin/v19/miner"
 	"github.com/filecoin-project/go-state-types/builtin/v19/multisig"
 	"github.com/filecoin-project/go-state-types/builtin/v19/power"
+	"github.com/filecoin-project/go-state-types/builtin/v19/reward"
 	"github.com/filecoin-project/go-state-types/builtin/v19/verifreg"
 	"gitlab.forceup.in/fil-data-factory/filscan-backend/modules/filscan/domain/message"
 )
@@ -64,6 +65,17 @@ var newParams = map[string]interface{}{
 	"UpgradeSectorQuality":       miner.UpgradeSectorQualityParams{},
 	"WithdrawBalance(miner)":     miner.WithdrawBalanceParams{},
 	"WithdrawBalance(market)":    market.WithdrawBalanceParams{},
+	// NV29(Solstice / FIP-0118) 奖励流方法（f02 的 9 个 FRC 方法）。
+	// 名字与类型以 go-state-types v0.19.0 builtin/v19/reward 为准（methods.go / reward_types.go）。
+	"SetWeightRecordsExported":  reward.SetWeightRecordsParams{},
+	"StepWeightRecordsExported": reward.StepWeightRecordsParams{},
+	"RegisterStreamExported":    reward.RegisterStreamParams{},
+	"RemoveStreamExported":      reward.RemoveStreamParams{},
+	"SetDistributionExported":   reward.SetDistributionParams{},
+	"SetSharesExported":         reward.SetSharesParams{},
+	"ReplaceAddressExported":    reward.ReplaceAddressParams{},
+	"CancelPendingExported":     reward.CancelPendingParams{},
+	"ClaimExported":             reward.ClaimParams{},
 }
 
 func DecodeMessageParams(input interface{}, methodName string) (result interface{}, err error) {
@@ -483,6 +495,105 @@ func DecodeMessageParams(input interface{}, methodName string) (result interface
 		}
 		if v != nil {
 			result, err = ConvertMessageType{}.WithdrawBalanceParamsMiner(v)
+			if err != nil {
+				return
+			}
+		}
+	case *reward.SetWeightRecordsParams:
+		err = v.UnmarshalCBOR(bytes.NewReader(paramsByte))
+		if err != nil {
+			return
+		}
+		if v != nil {
+			result, err = ConvertMessageType{}.SetWeightRecordsParams(v)
+			if err != nil {
+				return
+			}
+		}
+	case *reward.StepWeightRecordsParams:
+		err = v.UnmarshalCBOR(bytes.NewReader(paramsByte))
+		if err != nil {
+			return
+		}
+		if v != nil {
+			result, err = ConvertMessageType{}.StepWeightRecordsParams(v)
+			if err != nil {
+				return
+			}
+		}
+	case *reward.RegisterStreamParams:
+		err = v.UnmarshalCBOR(bytes.NewReader(paramsByte))
+		if err != nil {
+			return
+		}
+		if v != nil {
+			result, err = ConvertMessageType{}.RegisterStreamParams(v)
+			if err != nil {
+				return
+			}
+		}
+	case *reward.RemoveStreamParams:
+		err = v.UnmarshalCBOR(bytes.NewReader(paramsByte))
+		if err != nil {
+			return
+		}
+		if v != nil {
+			result, err = ConvertMessageType{}.RemoveStreamParams(v)
+			if err != nil {
+				return
+			}
+		}
+	case *reward.SetDistributionParams:
+		err = v.UnmarshalCBOR(bytes.NewReader(paramsByte))
+		if err != nil {
+			return
+		}
+		if v != nil {
+			result, err = ConvertMessageType{}.SetDistributionParams(v)
+			if err != nil {
+				return
+			}
+		}
+	case *reward.SetSharesParams:
+		err = v.UnmarshalCBOR(bytes.NewReader(paramsByte))
+		if err != nil {
+			return
+		}
+		if v != nil {
+			result, err = ConvertMessageType{}.SetSharesParams(v)
+			if err != nil {
+				return
+			}
+		}
+	case *reward.ReplaceAddressParams:
+		err = v.UnmarshalCBOR(bytes.NewReader(paramsByte))
+		if err != nil {
+			return
+		}
+		if v != nil {
+			result, err = ConvertMessageType{}.ReplaceAddressParams(v)
+			if err != nil {
+				return
+			}
+		}
+	case *reward.CancelPendingParams:
+		err = v.UnmarshalCBOR(bytes.NewReader(paramsByte))
+		if err != nil {
+			return
+		}
+		if v != nil {
+			result, err = ConvertMessageType{}.CancelPendingParams(v)
+			if err != nil {
+				return
+			}
+		}
+	case *reward.ClaimParams:
+		err = v.UnmarshalCBOR(bytes.NewReader(paramsByte))
+		if err != nil {
+			return
+		}
+		if v != nil {
+			result, err = ConvertMessageType{}.ClaimParams(v)
 			if err != nil {
 				return
 			}

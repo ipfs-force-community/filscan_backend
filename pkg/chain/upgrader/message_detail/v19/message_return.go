@@ -15,6 +15,7 @@ import (
 	"github.com/filecoin-project/go-state-types/builtin/v19/miner"
 	"github.com/filecoin-project/go-state-types/builtin/v19/multisig"
 	"github.com/filecoin-project/go-state-types/builtin/v19/power"
+	"github.com/filecoin-project/go-state-types/builtin/v19/reward"
 	"github.com/filecoin-project/go-state-types/builtin/v19/verifreg"
 	"gitlab.forceup.in/fil-data-factory/filscan-backend/modules/filscan/domain/message"
 )
@@ -64,6 +65,16 @@ var newReturns = map[string]interface{}{
 	"TransferFromExported":       datacap.TransferFromReturn{},
 	"UpgradeSectorQuality":       abi.EmptyValue{},
 	"WithdrawBalance":            abi.TokenAmount{},
+	// NV29(Solstice / FIP-0118) 奖励流方法返回：除 Claim 返回各钱包金额外，其余 8 个均无返回。
+	"SetWeightRecordsExported":  abi.EmptyValue{},
+	"StepWeightRecordsExported": abi.EmptyValue{},
+	"RegisterStreamExported":    abi.EmptyValue{},
+	"RemoveStreamExported":      abi.EmptyValue{},
+	"SetDistributionExported":   abi.EmptyValue{},
+	"SetSharesExported":         abi.EmptyValue{},
+	"ReplaceAddressExported":    abi.EmptyValue{},
+	"CancelPendingExported":     abi.EmptyValue{},
+	"ClaimExported":             reward.ClaimReturn{},
 }
 
 func DecodeMessageReturns(input interface{}, methodName string) (result interface{}, err error) {
@@ -245,6 +256,17 @@ func DecodeMessageReturns(input interface{}, methodName string) (result interfac
 		}
 		if v != nil {
 			result, err = ConvertMessageType{}.GetBeneficiaryReturn(v)
+			if err != nil {
+				return
+			}
+		}
+	case *reward.ClaimReturn:
+		err = v.UnmarshalCBOR(bytes.NewReader(paramsByte))
+		if err != nil {
+			return
+		}
+		if v != nil {
+			result, err = ConvertMessageType{}.ClaimReturn(v)
 			if err != nil {
 				return
 			}

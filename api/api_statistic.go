@@ -16,6 +16,7 @@ type StatisticAPI interface {
 	StatisticGasDataTrend
 	StatisticDCTrend
 	StatisticRewardStreams
+	StatisticRewardStreamLedger
 	StatisticContractTrend
 	FilCompose(ctx context.Context, req FilComposeRequest) (resp FilComposeResponse, err error)
 	PeerMap(ctx context.Context, req PeerMapRequest) (resp PeerMapResponse, err error)
@@ -311,4 +312,47 @@ type RewardStreamItem struct {
 	Service   decimal.Decimal `json:"service"` // 服务流（f02 内部记账，事后 Claim）
 	Burn      decimal.Decimal `json:"burn"`    // 销毁
 	Total     decimal.Decimal `json:"total"`   // 三者之和
+}
+
+// -----------------------区块奖励服务流账本（NV29/FIP-0118）-----------------------//
+
+// StatisticRewardStreamLedger 「服务流账本（当前状态快照）」：网络级展示 f02 奖励 actor 的实况——
+// 待提取总额、当期已提取合计、当前分账比例（链上日程的评估权重）、以及各受益地址的份额与待付。
+//
+// 与 RewardStreams 的口径区分（不要混用）：
+//   - RewardStreams  = f02 计数器的**窗口差分**，展示窗口内「已发生」的三股实收（历史事实）；
+//   - RewardStreamLedger = ledger 的**当前状态**，展示「当前评估权重（日程）」与「待提取欠款」。
+//     演示口径可能不同：权重按链上日程线性插值，实收占比还受期间赢票/出块分布影响。
+//
+// 数据源为 londobell 节点侧新端点 POST /adapter/reward_stream_ledger（取数走 acl → 节点，禁止本仓手搓 CBOR）。
+type StatisticRewardStreamLedger interface {
+	RewardStreamLedger(ctx context.Context, req RewardStreamLedgerRequest) (resp *RewardStreamLedgerResponse, err error)
+}
+
+type RewardStreamLedgerRequest struct {
+}
+
+type RewardStreamLedgerResponse struct {
+	Epoch         int64                    `json:"epoch"`          // 账本读取高度
+	Nv29          bool                     `json:"nv29"`           // 本网是否已激活 NV29；false 时金额字段为 "0"、recipients 为空
+	PendingClaim  decimal.Decimal          `json:"pending_claim"`  // 待提取总额 = ledger.Liability()（attoFIL）
+	ClaimedPeriod decimal.Decimal          `json:"claimed_period"` // 当期已提取合计（attoFIL）
+	CurrentSplit  *RewardStreamSplit       `json:"current_split"`  // 当前评估权重百分比（链上日程，非实测占比）
+	Recipients    []*RewardStreamRecipient `json:"recipients"`     // 各受益地址的份额%与待付
+}
+
+// RewardStreamSplit 当前分账比例（链上日程的评估权重百分比，一位小数）：
+// miner = 隐式流（矿工）权重；service = 各显式流权重之和；burn = Denom − Σ权重。
+type RewardStreamSplit struct {
+	Miner   string `json:"miner"`
+	Service string `json:"service"`
+	Burn    string `json:"burn"`
+}
+
+// RewardStreamRecipient 单个受益地址：share_pct 是其在份额表中的占比（相对 Denom，两位小数，
+// 与链上 RecipientShare.Share 同口径，不按 stream 权重折算）；pending_claim 是该地址可提取的欠款。
+type RewardStreamRecipient struct {
+	Address      string          `json:"address"`       // 受益地址
+	SharePct     string          `json:"share_pct"`     // 份额占比%（相对 Denom），两位小数
+	PendingClaim decimal.Decimal `json:"pending_claim"` // 待付金额（attoFIL）
 }

@@ -12,6 +12,7 @@ import (
 	"github.com/filecoin-project/go-state-types/builtin/v19/miner"
 	"github.com/filecoin-project/go-state-types/builtin/v19/multisig"
 	"github.com/filecoin-project/go-state-types/builtin/v19/power"
+	"github.com/filecoin-project/go-state-types/builtin/v19/reward"
 	"github.com/filecoin-project/go-state-types/builtin/v19/verifreg"
 	"github.com/libp2p/go-libp2p/core/peer"
 	"github.com/multiformats/go-multiaddr"
@@ -700,5 +701,127 @@ func (c ConvertMessageType) WithdrawBalanceParamsMiner(input *miner.WithdrawBala
 	result = &WithdrawBalanceParamsMiner{
 		AmountRequested: input.AmountRequested.String(),
 	}
+	return
+}
+
+// ===== NV29(Solstice / FIP-0118) 奖励流方法（f02）=====
+
+// weightRecord 把 v19 权重记录转成对外的整数形式。
+func (c ConvertMessageType) weightRecord(input reward.WeightRecord) WeightRecord {
+	return WeightRecord{
+		VStart: input.VStart,
+		Slope:  input.Slope,
+		TStart: int64(input.TStart),
+		Floor:  input.Floor,
+		Cap:    input.Cap,
+	}
+}
+
+func (c ConvertMessageType) weightRecordUpdates(input []reward.WeightRecordUpdate) []WeightRecordUpdate {
+	out := make([]WeightRecordUpdate, 0, len(input))
+	for _, update := range input {
+		out = append(out, WeightRecordUpdate{
+			ID:     uint64(update.ID),
+			Weight: c.weightRecord(update.Weight),
+		})
+	}
+	return out
+}
+
+func (c ConvertMessageType) recipientShares(input []reward.RecipientShare) []RecipientShare {
+	out := make([]RecipientShare, 0, len(input))
+	for _, share := range input {
+		out = append(out, RecipientShare{
+			Recipient: share.Recipient.String(),
+			Share:     share.Share,
+		})
+	}
+	return out
+}
+
+func (c ConvertMessageType) SetWeightRecordsParams(input *reward.SetWeightRecordsParams) (result interface{}, err error) {
+	result = &SetWeightRecordsParams{Updates: c.weightRecordUpdates(input.Updates)}
+	return
+}
+
+func (c ConvertMessageType) StepWeightRecordsParams(input *reward.StepWeightRecordsParams) (result interface{}, err error) {
+	result = &StepWeightRecordsParams{Updates: c.weightRecordUpdates(input.Updates)}
+	return
+}
+
+func (c ConvertMessageType) RegisterStreamParams(input *reward.RegisterStreamParams) (result interface{}, err error) {
+	out := &RegisterStreamParams{
+		ID:              uint64(input.ID),
+		Weight:          c.weightRecord(input.Weight),
+		ActivationEpoch: int64(input.ActivationEpoch),
+	}
+	if input.Distribution != nil {
+		out.Distribution = &DistributionInit{
+			Writer: input.Distribution.Writer.String(),
+			Shares: c.recipientShares(input.Distribution.Shares),
+		}
+	}
+	result = out
+	return
+}
+
+func (c ConvertMessageType) RemoveStreamParams(input *reward.RemoveStreamParams) (result interface{}, err error) {
+	result = &RemoveStreamParams{ID: uint64(input.ID)}
+	return
+}
+
+func (c ConvertMessageType) SetDistributionParams(input *reward.SetDistributionParams) (result interface{}, err error) {
+	result = &SetDistributionParams{
+		ID:     uint64(input.ID),
+		Writer: input.Writer.String(),
+	}
+	return
+}
+
+func (c ConvertMessageType) SetSharesParams(input *reward.SetSharesParams) (result interface{}, err error) {
+	result = &SetSharesParams{
+		ID:     uint64(input.ID),
+		Shares: c.recipientShares(input.Shares),
+	}
+	return
+}
+
+func (c ConvertMessageType) ReplaceAddressParams(input *reward.ReplaceAddressParams) (result interface{}, err error) {
+	result = &ReplaceAddressParams{
+		ID:         uint64(input.ID),
+		OldAddress: input.OldAddress.String(),
+		NewAddress: input.NewAddress.String(),
+	}
+	return
+}
+
+func (c ConvertMessageType) CancelPendingParams(input *reward.CancelPendingParams) (result interface{}, err error) {
+	out := &CancelPendingParams{Op: uint8(input.Op)}
+	if input.ID != nil {
+		id := uint64(*input.ID)
+		out.ID = &id
+	}
+	result = out
+	return
+}
+
+func (c ConvertMessageType) ClaimParams(input *reward.ClaimParams) (result interface{}, err error) {
+	wallets := make([]string, 0, len(input.Wallets))
+	for _, wallet := range input.Wallets {
+		wallets = append(wallets, wallet.String())
+	}
+	result = &ClaimParams{
+		ID:      uint64(input.ID),
+		Wallets: wallets,
+	}
+	return
+}
+
+func (c ConvertMessageType) ClaimReturn(input *reward.ClaimReturn) (result interface{}, err error) {
+	amounts := make([]string, 0, len(input.Amounts))
+	for _, amount := range input.Amounts {
+		amounts = append(amounts, amount.String())
+	}
+	result = &ClaimReturn{Amounts: amounts}
 	return
 }

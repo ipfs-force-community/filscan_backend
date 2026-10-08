@@ -38,6 +38,10 @@ type Adapter interface {
 	// 获取活跃扇区
 	// http://192.168.1.57:3000/project/11/interface/api/1083
 	ActiveSectors(ctx context.Context, miner chain.SmartAddress, epoch chain.Epoch) (r *ActiveSectorsReply, err error)
+	// RewardStreamLedger http://<londobell>/adapter/reward_stream_ledger —— 取 f02 奖励 actor 的
+	// NV29/FIP-0118 服务流账本（lotus reward.State.StreamLedger），epoch 为 nil 时取链头。
+	// 契约见 .hermes/plans/2026-10-08-nv29-adapt/README.md §8.1（契约 D）。v18 时返回 nv29=false。
+	RewardStreamLedger(ctx context.Context, epoch *chain.Epoch) (ledger *RewardStreamLedger, err error)
 }
 
 type EpochReply struct {
@@ -274,4 +278,48 @@ type MinerSector struct {
 	PowerBaseEpoch int64 `json:"PowerBaseEpoch"`
 	// FullQaPower 是 londobell 按 lotus miner.SectorIsFullQaPower 判定的「满 QA（10x）」。
 	FullQaPower bool `json:"FullQaPower"`
+}
+
+// RewardStreamLedger 是 londobell /adapter/reward_stream_ledger 返回的 f02 服务流账本（契约 §8.1）。
+//
+// 金额一律 attoFIL 字符串；权重/evaluated_weight/share 用 Denom=1e18 定点（十进制整体读入到 decimal）。
+// v18（本网未升 NV29）：Nv29=false、Streams 为空，其余字段为 0/空——是正常响应，不是错误。
+type RewardStreamLedger struct {
+	Epoch      int64                          `json:"epoch"`
+	Nv29       bool                           `json:"nv29"`
+	Denom      decimal.Decimal                `json:"denom"`
+	Streams    []*RewardStreamLedgerStream    `json:"streams"`
+	Tombstones []*RewardStreamLedgerTombstone `json:"tombstones"`
+	// Liability 是奖励 actor 欠受益方的价值（live + tombstone），等于 lotus reward.StreamLedger.Liability()。
+	Liability decimal.Decimal `json:"liability"`
+}
+
+// RewardStreamLedgerStream 是一条 live 奖励流的账本行。Implicit=true 的即矿工共识流（无 shares）。
+type RewardStreamLedgerStream struct {
+	ID              uint64                         `json:"id"`
+	Implicit        bool                           `json:"implicit"`
+	EvaluatedWeight decimal.Decimal                `json:"evaluated_weight"`
+	Accrued         decimal.Decimal                `json:"accrued"`
+	ClaimedPeriod   decimal.Decimal                `json:"claimed_period"`
+	Payable         decimal.Decimal                `json:"payable"`
+	Recipients      []*RewardStreamLedgerRecipient `json:"recipients"`
+}
+
+// RewardStreamLedgerRecipient 是某条显式流里一个受益方的份额与账目行。
+type RewardStreamLedgerRecipient struct {
+	Address       string          `json:"address"`
+	Share         decimal.Decimal `json:"share"`
+	Payable       decimal.Decimal `json:"payable"`
+	ClaimedPeriod decimal.Decimal `json:"claimed_period"`
+}
+
+// RewardStreamLedgerTombstone 是被移除但仍欠款的流（只剩每个人的未提取余额，无份额）。
+type RewardStreamLedgerTombstone struct {
+	ID         uint64                                  `json:"id"`
+	Recipients []*RewardStreamLedgerTombstoneRecipient `json:"recipients"`
+}
+
+type RewardStreamLedgerTombstoneRecipient struct {
+	Address string          `json:"address"`
+	Payable decimal.Decimal `json:"payable"`
 }
