@@ -103,6 +103,26 @@ type RewardStreamRecipientTask interface {
 	DeleteRewardStreamRecipientsLteEpoch(ctx context.Context, lteEpoch chain.Epoch) (err error)
 }
 
+// RewardStreamRecipientPeriodTask 「奖励流受益方按周期归集」表 chain.reward_stream_recipient_period
+// 的读写仓储（采集侧写 + 展示侧读路径）。与 RewardStreamRecipientTask（按高度快照）配套：
+// 快照表只服务当前周期、可被 HistoryClear 修剪；本表**只增不减、跨周期保留**，
+// 供上层按地址 SUM 出「累计已收」。表结构与口径见 migration/38.reward_stream_recipient_period.sql。
+//
+// 幂等约定：唯一键 (address, period_start_epoch)，Upsert 为合并写
+// （claimed_in_period 取 GREATEST、first_epoch 取 LEAST、last_epoch 取 GREATEST），
+// 同一高度重跑、跨高度重复观测都不产生重复行，也**绝不会把大值覆盖成小值**。
+type RewardStreamRecipientPeriodTask interface {
+	// UpsertRewardStreamRecipientPeriods 批量合并写（同 (address, period_start_epoch) 合并且不降值）。
+	// 空切片表示该高度没有可归集的受益方（不写、也不删旧行）。
+	UpsertRewardStreamRecipientPeriods(ctx context.Context, items []*po.RewardStreamRecipientPeriod) (err error)
+	// ListRewardStreamRecipientPeriodsByAddresses 按地址批量取该地址的全部周期行（供上层 SUM 出累计已收）。
+	// 按 (address asc, period_start_epoch asc) 定序返回。空地址切片返回 nil、不发 SQL。
+	ListRewardStreamRecipientPeriodsByAddresses(ctx context.Context, addresses []string) (items []*po.RewardStreamRecipientPeriod, err error)
+	// DeleteRewardStreamRecipientPeriodsGteEpoch 删除 last_epoch >= gteEpoch 的行（链回滚用）。
+	// 注意边界列是 last_epoch（最近一次观测到该受益方的高度），不是周期起点 period_start_epoch。
+	DeleteRewardStreamRecipientPeriodsGteEpoch(ctx context.Context, gteEpoch chain.Epoch) (err error)
+}
+
 type MinerRewardRange interface {
 	// MinerBlockRewardRange 逐 epoch 出块奖励（单矿工），区间左闭右开 [start, end)，
 	// 对齐聚合器端点 miner_blockreward 的分组口径（按 epoch 分组，按 epoch 升序返回）。

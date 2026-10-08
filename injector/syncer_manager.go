@@ -195,10 +195,10 @@ func NewSyncerManager(conf *config.Config, db *gorm.DB, agg londobell.Agg, miner
 				},
 			),
 			syncer.WithCalculators(
-				calc_miner_acc_reward_task.NewCalcMinerAccRewardTask(dal.NewRewardTaskDal(db)),                          // 计算 Miner 奖励统计值，依赖历史高度汇总值
-				calc_estimate_miner_gas.NewCalEstimateMinerGas(dal.NewSyncerTraceTaskDal(db)),                           // 通过 BaselineTask 任务的高度值，计算当下高度的 Miner 消耗预估值
-				calc_miner_agg_reward.NewCalcMinerAggReward(dal.NewRewardTaskDal(db)),                                   // 计算 Miner 的历史统计值，提供 Pro 使用
-				calc_reward_stream_recipient_task.NewCalcRewardStreamRecipientTask(dal.NewRewardStreamRecipientDal(db)), // f02 奖励流受益方按高度快照（NV29/FIP-0118），只服务当前链上周期
+				calc_miner_acc_reward_task.NewCalcMinerAccRewardTask(dal.NewRewardTaskDal(db)),                                                                     // 计算 Miner 奖励统计值，依赖历史高度汇总值
+				calc_estimate_miner_gas.NewCalEstimateMinerGas(dal.NewSyncerTraceTaskDal(db)),                                                                      // 通过 BaselineTask 任务的高度值，计算当下高度的 Miner 消耗预估值
+				calc_miner_agg_reward.NewCalcMinerAggReward(dal.NewRewardTaskDal(db)),                                                                              // 计算 Miner 的历史统计值，提供 Pro 使用
+				calc_reward_stream_recipient_task.NewCalcRewardStreamRecipientTask(dal.NewRewardStreamRecipientDal(db), dal.NewRewardStreamRecipientPeriodDal(db)), // f02 奖励流受益方：按高度快照（当前周期）+ 按周期归集（累计已收），NV29/FIP-0118
 			),
 		),
 
