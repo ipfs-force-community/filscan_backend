@@ -7,8 +7,10 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/filecoin-project/lotus/build/buildconstants"
 	"github.com/shopspring/decimal"
 	filscan "gitlab.forceup.in/fil-data-factory/filscan-backend/api"
+	"gitlab.forceup.in/fil-data-factory/filscan-backend/modules/common/infra/po"
 	"gitlab.forceup.in/fil-data-factory/filscan-backend/pkg/chain"
 	"gitlab.forceup.in/fil-data-factory/filscan-backend/pkg/londobell"
 )
@@ -39,6 +41,20 @@ const caliLedgerJSON = `{
   "liability": "7984380000000000000000"
 }`
 
+// fakeRewardStreamRecipientSnapshot 假「本周期受益方快照」仓储（窄接口），记录调用次数与查询区间供降级/未激活断言。
+type fakeRewardStreamRecipientSnapshot struct {
+	rows  []*po.RewardStreamRecipientEpoch
+	err   error
+	calls int
+	rng   chain.LCRCRange
+}
+
+func (f *fakeRewardStreamRecipientSnapshot) ListRewardStreamRecipientsByEpochRange(_ context.Context, epochs chain.LCRCRange) ([]*po.RewardStreamRecipientEpoch, error) {
+	f.calls++
+	f.rng = epochs
+	return f.rows, f.err
+}
+
 func mustLedger(t *testing.T, raw string) *londobell.RewardStreamLedger {
 	t.Helper()
 	var l londobell.RewardStreamLedger
@@ -65,7 +81,7 @@ func (f *fakeRewardStreamLedgerSource) GetRewardStreamLedger(_ context.Context, 
 // NV29 已激活：分账比例＝评估权重百分比（50/45/5）、份额%＝share/denom、待提取＝liability 直通。
 func TestRewardStreamLedgerCaliRealSnapshot(t *testing.T) {
 	src := &fakeRewardStreamLedgerSource{ledger: mustLedger(t, caliLedgerJSON)}
-	biz := NewStatisticRewardStreamLedgerBiz(&fakeRewardStreamsSyncer{epoch: 4110339}, src)
+	biz := NewStatisticRewardStreamLedgerBiz(&fakeRewardStreamsSyncer{epoch: 4110339}, src, &fakeRewardStreamRecipientSnapshot{})
 
 	resp, err := biz.RewardStreamLedger(context.Background(), filscan.RewardStreamLedgerRequest{})
 	if err != nil {
@@ -191,7 +207,7 @@ const caliZeroShareLedgerJSON = `{
 // 两行都是 0.00% 但来源不同，前端据此各给一句说明。
 func TestRewardStreamLedgerZeroShareLiveStream(t *testing.T) {
 	src := &fakeRewardStreamLedgerSource{ledger: mustLedger(t, caliZeroShareLedgerJSON)}
-	biz := NewStatisticRewardStreamLedgerBiz(&fakeRewardStreamsSyncer{epoch: 4139065}, src)
+	biz := NewStatisticRewardStreamLedgerBiz(&fakeRewardStreamsSyncer{epoch: 4139065}, src, &fakeRewardStreamRecipientSnapshot{})
 
 	resp, err := biz.RewardStreamLedger(context.Background(), filscan.RewardStreamLedgerRequest{})
 	if err != nil {
@@ -240,7 +256,7 @@ func TestRewardStreamLedgerZeroShareLiveStream(t *testing.T) {
 func TestRewardStreamLedgerV18FallsBack(t *testing.T) {
 	logs := captureBizLogs(t)
 	v18 := &londobell.RewardStreamLedger{Epoch: 6429840, Nv29: false, Denom: decimal.RequireFromString("1000000000000000000")}
-	biz := NewStatisticRewardStreamLedgerBiz(&fakeRewardStreamsSyncer{epoch: 6429840}, &fakeRewardStreamLedgerSource{ledger: v18})
+	biz := NewStatisticRewardStreamLedgerBiz(&fakeRewardStreamsSyncer{epoch: 6429840}, &fakeRewardStreamLedgerSource{ledger: v18}, &fakeRewardStreamRecipientSnapshot{})
 
 	resp, err := biz.RewardStreamLedger(context.Background(), filscan.RewardStreamLedgerRequest{})
 	if err != nil {
@@ -267,7 +283,7 @@ func TestRewardStreamLedgerV18FallsBack(t *testing.T) {
 func TestRewardStreamLedgerFetchErrorFallsBack(t *testing.T) {
 	logs := captureBizLogs(t)
 	src := &fakeRewardStreamLedgerSource{err: errors.New("boom")}
-	biz := NewStatisticRewardStreamLedgerBiz(&fakeRewardStreamsSyncer{epoch: 6429840}, src)
+	biz := NewStatisticRewardStreamLedgerBiz(&fakeRewardStreamsSyncer{epoch: 6429840}, src, &fakeRewardStreamRecipientSnapshot{})
 
 	resp, err := biz.RewardStreamLedger(context.Background(), filscan.RewardStreamLedgerRequest{})
 	if err != nil {
@@ -286,7 +302,7 @@ func TestRewardStreamLedgerFetchErrorFallsBack(t *testing.T) {
 
 // 同步器高度取不到：同样回退 nv29=false，不报错、不 500。
 func TestRewardStreamLedgerSyncerErrorFallsBack(t *testing.T) {
-	biz := NewStatisticRewardStreamLedgerBiz(&fakeRewardStreamsSyncer{err: errors.New("db down")}, &fakeRewardStreamLedgerSource{})
+	biz := NewStatisticRewardStreamLedgerBiz(&fakeRewardStreamsSyncer{err: errors.New("db down")}, &fakeRewardStreamLedgerSource{}, &fakeRewardStreamRecipientSnapshot{})
 	resp, err := biz.RewardStreamLedger(context.Background(), filscan.RewardStreamLedgerRequest{})
 	if err != nil {
 		t.Fatalf("同步器失败不得向上抛错: %s", err)
@@ -312,5 +328,189 @@ func TestRewardStreamLedgerBurnClamped(t *testing.T) {
 	}
 	if !strings.Contains(logs.String(), "超过 Denom") {
 		t.Fatalf("超权重必须打 WARN，实际日志:\n%s", logs.String())
+	}
+}
+
+// departedActiveLedger 构造一份 nv29=true 的当前账本：一条显式流、一个活跃受益方 t0199897（份额 100%、本期应计 1e18）。
+// 用于演练「本周期离场者」补齐路径（活跃行待付 1e18）。
+func departedActiveLedger(epoch int64) *londobell.RewardStreamLedger {
+	return &londobell.RewardStreamLedger{
+		Epoch: epoch, Nv29: true, Denom: decimal.RequireFromString("1000000000000000000"),
+		Streams: []*londobell.RewardStreamLedgerStream{
+			{ID: 1, Implicit: true, EvaluatedWeight: decimal.RequireFromString("500000000000000000")},
+			{ID: 2, Implicit: false, EvaluatedWeight: decimal.RequireFromString("450000000000000000"),
+				Accrued: decimal.RequireFromString("1000000000000000000"),
+				Recipients: []*londobell.RewardStreamLedgerRecipient{
+					{Address: "t0199897", Share: decimal.RequireFromString("1000000000000000000"), Payable: decimal.Zero, ClaimedPeriod: decimal.Zero},
+				}},
+		},
+		Liability: decimal.RequireFromString("1000000000000000000"),
+	}
+}
+
+// ①有离场地址：补在末尾、五个金额/份额字段口径正确、不变量 pending==current+carried 成立；
+// 周期起点按 nv29Epoch + ((cur−nv29Epoch)/periodLen)*periodLen 计算，且查询区间为 [周期起点, 当前高度]。
+func TestRewardStreamLedgerDepartedAppended(t *testing.T) {
+	const solstice = int64(6_000_000)
+	periodLen := int64(buildconstants.SolsticeEpochsPerQuarter)
+	cur := solstice + 2*periodLen + 5
+	wantStart := solstice + 2*periodLen
+
+	snap := &fakeRewardStreamRecipientSnapshot{rows: []*po.RewardStreamRecipientEpoch{
+		// 活跃地址（当前仍在）——不得当作离场者补入。
+		{Epoch: cur - 100, Address: "t0199897", Share: decimal.RequireFromString("1000000000000000000"), Payable: decimal.RequireFromString("5000000000000000000")},
+		// 离场者两行：口径取本周期内 epoch 最大那一行。
+		{Epoch: cur - 900, Address: "t0300111", Share: decimal.RequireFromString("300000000000000000"), Payable: decimal.RequireFromString("111000000000000000000")},
+		{Epoch: cur - 50, Address: "t0300111", Share: decimal.RequireFromString("737500000000000000"), Payable: decimal.RequireFromString("222000000000000000000"), ClaimedPeriod: decimal.RequireFromString("42000000000000000000")},
+	}}
+	biz := NewStatisticRewardStreamLedgerBiz(&fakeRewardStreamsSyncer{epoch: cur}, &fakeRewardStreamLedgerSource{ledger: departedActiveLedger(cur)}, snap)
+	biz.solsticeEpoch = solstice
+
+	resp, err := biz.RewardStreamLedger(context.Background(), filscan.RewardStreamLedgerRequest{})
+	if err != nil {
+		t.Fatalf("不应报错: %s", err)
+	}
+	if snap.calls != 1 {
+		t.Fatalf("nv29 已激活且已排期时应查 1 次快照，实际 %d", snap.calls)
+	}
+	if snap.rng.GteBegin.Int64() != wantStart || snap.rng.LteEnd.Int64() != cur {
+		t.Fatalf("快照查询区间应为 [周期起点 %d, 当前高度 %d]，得到 [%d, %d]",
+			wantStart, cur, snap.rng.GteBegin.Int64(), snap.rng.LteEnd.Int64())
+	}
+	if len(resp.Recipients) != 2 {
+		t.Fatalf("应返回 2 个受益方（1 活跃 + 1 离场），得到 %d", len(resp.Recipients))
+	}
+	a := resp.Recipients[0]
+	if a.Address != "t0199897" || a.Departed {
+		t.Fatalf("活跃行应为 t0199897/departed=false，得到 %s/departed=%v", a.Address, a.Departed)
+	}
+	d := resp.Recipients[1]
+	if d.Address != "t0300111" || !d.Departed {
+		t.Fatalf("离场行应为 t0300111/departed=true，得到 %s/departed=%v", d.Address, d.Departed)
+	}
+	if d.SharePct != "0.00" {
+		t.Fatalf("离场行当前无份额 ⇒ share_pct 应 0.00，得到 %s", d.SharePct)
+	}
+	if d.LastSharePct != "73.75" {
+		t.Fatalf("离场行 last_share_pct 应为离场行 Share 折算 73.75，得到 %s", d.LastSharePct)
+	}
+	if d.LeftEpoch != cur-50 {
+		t.Fatalf("离场行 left_epoch 应取本周期内 epoch 最大行 %d，得到 %d", cur-50, d.LeftEpoch)
+	}
+	if !d.PendingClaimCurrent.IsZero() {
+		t.Fatalf("离场行当期应收应为 0，得到 %s", d.PendingClaimCurrent)
+	}
+	if !d.PendingClaimCarried.Equal(decimal.RequireFromString("222000000000000000000")) {
+		t.Fatalf("离场行跨周期应收应取离场行 Payable 222e18，得到 %s", d.PendingClaimCarried)
+	}
+	if !d.PendingClaim.Equal(d.PendingClaimCarried) {
+		t.Fatalf("离场行 pending_claim 应等于 carried，得到 %s vs %s", d.PendingClaim, d.PendingClaimCarried)
+	}
+	if !d.ClaimedPeriod.Equal(decimal.RequireFromString("42000000000000000000")) {
+		t.Fatalf("离场行 claimed_period 应取离场行值 42e18，得到 %s", d.ClaimedPeriod)
+	}
+	if !d.PendingClaimCurrent.Add(d.PendingClaimCarried).Equal(d.PendingClaim) {
+		t.Fatalf("离场行拆列不守恒: current %s + carried %s != pending %s", d.PendingClaimCurrent, d.PendingClaimCarried, d.PendingClaim)
+	}
+}
+
+// ②快照查询报错（如表未建）时降级：接口正常返回、无 departed 行、无 error、打 WARN。
+func TestRewardStreamLedgerDepartedSnapshotErrorDegrades(t *testing.T) {
+	const solstice = int64(6_000_000)
+	cur := solstice + 5
+	logs := captureBizLogs(t)
+	snap := &fakeRewardStreamRecipientSnapshot{err: errors.New(`relation "chain.reward_stream_recipient_epoch" does not exist`)}
+	biz := NewStatisticRewardStreamLedgerBiz(&fakeRewardStreamsSyncer{epoch: cur}, &fakeRewardStreamLedgerSource{ledger: departedActiveLedger(cur)}, snap)
+	biz.solsticeEpoch = solstice
+
+	resp, err := biz.RewardStreamLedger(context.Background(), filscan.RewardStreamLedgerRequest{})
+	if err != nil {
+		t.Fatalf("快照表不存在时不得向上抛错: %s", err)
+	}
+	if !resp.Nv29 {
+		t.Fatal("快照失败不应影响 nv29（仍应 true，按只有当前状态返回）")
+	}
+	if snap.calls != 1 {
+		t.Fatalf("应尝试查 1 次快照，实际 %d", snap.calls)
+	}
+	if len(resp.Recipients) != 1 || resp.Recipients[0].Departed {
+		t.Fatalf("降级时应只返回当前活跃受益方、无 departed 行，得到 %d 行", len(resp.Recipients))
+	}
+	if !strings.Contains(logs.String(), "快照失败") {
+		t.Fatalf("快照取数失败必须打 WARN，实际日志:\n%s", logs.String())
+	}
+}
+
+// ③nv29 未激活时不查快照（假实现计数断言 0 次）：nv29=false / 未排期(solsticeEpoch=0) / 当前高度早于激活高度。
+func TestRewardStreamLedgerDepartedNotQueriedWhenInactive(t *testing.T) {
+	const solstice = int64(6_000_000)
+	periodLen := int64(buildconstants.SolsticeEpochsPerQuarter)
+	cur := solstice + periodLen + 1
+
+	// 情形一：账本 nv29=false（本网未激活）。
+	v18 := &londobell.RewardStreamLedger{Epoch: cur, Nv29: false, Denom: decimal.RequireFromString("1000000000000000000")}
+	snap1 := &fakeRewardStreamRecipientSnapshot{}
+	biz1 := NewStatisticRewardStreamLedgerBiz(&fakeRewardStreamsSyncer{epoch: cur}, &fakeRewardStreamLedgerSource{ledger: v18}, snap1)
+	biz1.solsticeEpoch = solstice
+	if _, err := biz1.RewardStreamLedger(context.Background(), filscan.RewardStreamLedgerRequest{}); err != nil {
+		t.Fatalf("不应报错: %s", err)
+	}
+	if snap1.calls != 0 {
+		t.Fatalf("nv29=false 时不得查快照，实际 %d 次", snap1.calls)
+	}
+
+	// 情形二：本网未排期（solsticeEpoch=0）。
+	snap2 := &fakeRewardStreamRecipientSnapshot{}
+	biz2 := NewStatisticRewardStreamLedgerBiz(&fakeRewardStreamsSyncer{epoch: cur}, &fakeRewardStreamLedgerSource{ledger: departedActiveLedger(cur)}, snap2)
+	biz2.solsticeEpoch = 0
+	if _, err := biz2.RewardStreamLedger(context.Background(), filscan.RewardStreamLedgerRequest{}); err != nil {
+		t.Fatalf("不应报错: %s", err)
+	}
+	if snap2.calls != 0 {
+		t.Fatalf("未排期时不得查快照，实际 %d 次", snap2.calls)
+	}
+
+	// 情形三：当前高度早于激活高度。
+	snap3 := &fakeRewardStreamRecipientSnapshot{}
+	biz3 := NewStatisticRewardStreamLedgerBiz(&fakeRewardStreamsSyncer{epoch: solstice - 1}, &fakeRewardStreamLedgerSource{ledger: departedActiveLedger(solstice - 1)}, snap3)
+	biz3.solsticeEpoch = solstice
+	if _, err := biz3.RewardStreamLedger(context.Background(), filscan.RewardStreamLedgerRequest{}); err != nil {
+		t.Fatalf("不应报错: %s", err)
+	}
+	if snap3.calls != 0 {
+		t.Fatalf("当前高度早于激活高度时不得查快照，实际 %d 次", snap3.calls)
+	}
+}
+
+// ④两个（含并列）离场地址按 carried 降序（相等按地址升序），且一律排在活跃行之后。
+func TestRewardStreamLedgerDepartedOrderByCarriedDesc(t *testing.T) {
+	const solstice = int64(6_000_000)
+	cur := solstice + 3
+	snap := &fakeRewardStreamRecipientSnapshot{rows: []*po.RewardStreamRecipientEpoch{
+		{Epoch: cur - 3, Address: "t0300202", Share: decimal.RequireFromString("100000000000000000"), Payable: decimal.RequireFromString("500000000000000000000")},
+		{Epoch: cur - 2, Address: "t0300201", Share: decimal.RequireFromString("200000000000000000"), Payable: decimal.RequireFromString("900000000000000000000")},
+		{Epoch: cur - 1, Address: "t0300200", Share: decimal.RequireFromString("300000000000000000"), Payable: decimal.RequireFromString("500000000000000000000")},
+	}}
+	biz := NewStatisticRewardStreamLedgerBiz(&fakeRewardStreamsSyncer{epoch: cur}, &fakeRewardStreamLedgerSource{ledger: departedActiveLedger(cur)}, snap)
+	biz.solsticeEpoch = solstice
+
+	resp, err := biz.RewardStreamLedger(context.Background(), filscan.RewardStreamLedgerRequest{})
+	if err != nil {
+		t.Fatalf("不应报错: %s", err)
+	}
+	if len(resp.Recipients) != 4 { // 1 活跃 + 3 离场
+		t.Fatalf("应返回 4 个受益方，得到 %d", len(resp.Recipients))
+	}
+	if resp.Recipients[0].Departed {
+		t.Fatal("活跃行应排在所有离场行之前")
+	}
+	got := make([]string, 0, 3)
+	for _, r := range resp.Recipients[1:] {
+		got = append(got, r.Address)
+	}
+	// carried 降序：t0300201(900) 在前；两个 500 相等 ⇒ 按地址升序 t0300200 < t0300202。
+	want := []string{"t0300201", "t0300200", "t0300202"}
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Fatalf("离场行顺序应 %v，得到 %v", want, got)
 	}
 }

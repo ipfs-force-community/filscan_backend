@@ -5,11 +5,14 @@ import (
 	"math/big"
 	"sort"
 
+	"github.com/filecoin-project/lotus/build/buildconstants"
 	"github.com/shopspring/decimal"
 	filscan "gitlab.forceup.in/fil-data-factory/filscan-backend/api"
+	"gitlab.forceup.in/fil-data-factory/filscan-backend/modules/common/infra/po"
 	"gitlab.forceup.in/fil-data-factory/filscan-backend/modules/common/repository"
 	"gitlab.forceup.in/fil-data-factory/filscan-backend/modules/syncer"
 	"gitlab.forceup.in/fil-data-factory/filscan-backend/pkg/chain"
+	"gitlab.forceup.in/fil-data-factory/filscan-backend/pkg/chain/upgrader/message_detail"
 	"gitlab.forceup.in/fil-data-factory/filscan-backend/pkg/londobell"
 )
 
@@ -31,8 +34,19 @@ type rewardStreamLedgerSource interface {
 	GetRewardStreamLedger(ctx context.Context, epoch *chain.Epoch) (*londobell.RewardStreamLedger, error)
 }
 
-func NewStatisticRewardStreamLedgerBiz(se repository.SyncerGetter, ledger rewardStreamLedgerSource) *StatisticRewardStreamLedgerBiz {
-	return &StatisticRewardStreamLedgerBiz{se: se, ledger: ledger}
+// rewardStreamRecipientSnapshotSource 「本周期受益方快照」取数能力（窄接口，便于单测注入假实现）。
+// 由 dal.RewardStreamRecipientDal 满足（repository.RewardStreamRecipientTask 的只读取子集）。
+type rewardStreamRecipientSnapshotSource interface {
+	ListRewardStreamRecipientsByEpochRange(ctx context.Context, epochs chain.LCRCRange) ([]*po.RewardStreamRecipientEpoch, error)
+}
+
+func NewStatisticRewardStreamLedgerBiz(se repository.SyncerGetter, ledger rewardStreamLedgerSource, recipients rewardStreamRecipientSnapshotSource) *StatisticRewardStreamLedgerBiz {
+	return &StatisticRewardStreamLedgerBiz{
+		se:            se,
+		ledger:        ledger,
+		recipients:    recipients,
+		solsticeEpoch: nv29EpochOrZero(message_detail.UpgradeSolsticeHeight.Int64()),
+	}
 }
 
 var _ filscan.StatisticRewardStreamLedger = (*StatisticRewardStreamLedgerBiz)(nil)
@@ -40,12 +54,19 @@ var _ filscan.StatisticRewardStreamLedger = (*StatisticRewardStreamLedgerBiz)(ni
 type StatisticRewardStreamLedgerBiz struct {
 	se     repository.SyncerGetter
 	ledger rewardStreamLedgerSource
+	// recipients 「本周期受益方快照」只读取（用来补本周期离场者）。表未建 / 未注入时为 nil ⇒ 只按当前链上状态返回。
+	recipients rewardStreamRecipientSnapshotSource
+	// solsticeEpoch 本网 NV29 激活高度（未排期 ⇒ 0，见 nv29EpochOrZero）；为 0 时不查快照。
+	// 构造时取 message_detail.UpgradeSolsticeHeight；单测可覆盖此字段以在默认（mainnet）构建下演练已激活路径。
+	solsticeEpoch int64
 }
 
 // RewardStreamLedger 取当前链头的服务流账本并化成对外响应。
 //
 // 兜底（硬要求：**不得 500**）：
 //   - 取当前高度失败 / 账本取数失败 / 节点返回 v18 → 打 WARN + 返回 nv29:false、金额 "0"、recipients 空。
+//   - 本周期快照取数失败（如表 chain.reward_stream_recipient_epoch 尚未建）→ 打 WARN + 只按当前链上状态返回，
+//     接口照常可用（不报错、不回滚）；见 appendDepartedRecipients。
 func (s StatisticRewardStreamLedgerBiz) RewardStreamLedger(ctx context.Context, _ filscan.RewardStreamLedgerRequest) (resp *filscan.RewardStreamLedgerResponse, err error) {
 	current, epochErr := s.se.GetSyncer(ctx, syncer.ChainSyncer)
 	if epochErr != nil || current == nil {
@@ -64,7 +85,10 @@ func (s StatisticRewardStreamLedgerBiz) RewardStreamLedger(ctx context.Context, 
 		log.Warnf("reward_stream_ledger: epoch=%d 节点返回 nv29=false（本网未激活 NV29），返回 nv29=false 空账本", epoch.Int64())
 	}
 
-	return buildRewardStreamLedgerResponse(ledger, epoch.Int64()), nil
+	resp = buildRewardStreamLedgerResponse(ledger, epoch.Int64())
+	// 本周期离场者：当前高度取同一条链头路径（epoch）。仅在 nv29 已激活且快照可用时补；取数失败自动降级。
+	s.appendDepartedRecipients(ctx, resp, ledger, epoch.Int64())
+	return resp, nil
 }
 
 // emptyRewardStreamLedgerResponse nv29=false / 取数失败时的兜底响应：金额 "0"、分账比例全 0、受益方空数组。
@@ -89,11 +113,7 @@ func buildRewardStreamLedgerResponse(ledger *londobell.RewardStreamLedger, fallb
 		return emptyRewardStreamLedgerResponse(epoch)
 	}
 
-	denom := ledger.Denom
-	if !denom.IsPositive() {
-		// 节点未给 denom（老响应）时退回固定 1e18，避免除零。
-		denom = rewardDenomDecimal
-	}
+	denom := rewardLedgerDenom(ledger)
 
 	var minerWeight, serviceWeight, claimedPeriod decimal.Decimal
 	for _, st := range ledger.Streams {
@@ -146,6 +166,14 @@ func sharePercent(share, denom decimal.Decimal) string {
 	return share.Mul(decimal.NewFromInt(100)).Div(denom).Round(2).StringFixed(2)
 }
 
+// rewardLedgerDenom 账本定点分母；节点未给 denom（老响应）时退回固定 1e18，避免除零。
+func rewardLedgerDenom(ledger *londobell.RewardStreamLedger) decimal.Decimal {
+	if ledger != nil && ledger.Denom.IsPositive() {
+		return ledger.Denom
+	}
+	return rewardDenomDecimal
+}
+
 // rewardStreamRecipientAgg 同一受益地址跨流的合并行（地址 / 份额 / 待付 / 本期已提）。
 type rewardStreamRecipientAgg struct {
 	share decimal.Decimal
@@ -176,6 +204,18 @@ type rewardStreamRecipientAgg struct {
 //
 // 待付拆两列（2026-10-09 用户裁定）：pending_claim_current（当期＝本期应计−本期已提）与
 // pending_claim_carried（跨周期＝链上 Payable，即此前各期已结算未提取的结转）；两列之和恒等于 pending_claim。
+//
+// 本周期离场者（departed，2026-10-10 追加）：本函数只反映**当前链上状态**——已离场且欠款提完的受益方在链上会
+// 彻底消失，单看链头查不到。展示层据此在本函数输出之后补一行（appendDepartedRecipients）：
+//   - 周期起点 = nv29Epoch + ((curEpoch−nv29Epoch)/periodLen)*periodLen（整除取整；periodLen =
+//     buildconstants.SolsticeEpochsPerQuarter；curEpoch 取链头高度）；
+//   - 用快照表 chain.reward_stream_recipient_epoch 取 [周期起点, 当前高度]（左闭右闭）内出现过、
+//     但当前链上状态（活跃份额表 + 已移除流遗留欠款）里**没有**的地址，每个地址取本周期内 epoch 最大的那一行；
+//   - 该行口径：share_pct="0.00"（当前无份额）、pending_claim_current=0、pending_claim_carried=该行 Payable、
+//     pending_claim=carried（保持 pending==current+carried）、departed=true、left_epoch=该行 epoch、
+//     last_share_pct=该行 Share 按 sharePercent（同 share_pct 口径）折算；
+//   - 排序：活跃行保持原序并一律在前，离场行补在末尾、内部按 pending_claim_carried 降序（相等按地址升序）；
+//   - **快照取数失败必须降级**：打 WARN 后只按当前链上状态返回，接口不得 500。
 //
 // 输出顺序＝「服务受益方排行」顺序：按待付 pending_claim 降序，pending 相等时按地址升序（稳定）；
 // 不做截断，全部返回（前端按序取前 N）。
@@ -277,4 +317,121 @@ func mulDiv(a, b, c decimal.Decimal) decimal.Decimal {
 	num := new(big.Int).Mul(a.BigInt(), b.BigInt())
 	q := new(big.Int).Quo(num, c.BigInt())
 	return decimal.NewFromBigInt(q, 0)
+}
+
+// periodStartEpoch 本网 NV29 奖励周期的起点高度（向下对齐到周期边界）：
+//
+//	start = nv29Epoch + ((curEpoch − nv29Epoch) / periodLen) * periodLen
+//
+// nv29Epoch 为 NV29 激活高度、periodLen 为周期长度（buildconstants.SolsticeEpochsPerQuarter）。
+// 整数整除（全非负）。curEpoch 早于激活高度或 periodLen 非正 ⇒ 退回激活高度本身。
+func periodStartEpoch(nv29Epoch, curEpoch, periodLen int64) int64 {
+	if periodLen <= 0 || curEpoch <= nv29Epoch {
+		return nv29Epoch
+	}
+	return nv29Epoch + ((curEpoch-nv29Epoch)/periodLen)*periodLen
+}
+
+// appendDepartedRecipients 把「本周期内出现过、但当前链上已查不到」的受益方补进排行末尾并标 departed。
+//
+// 触发条件（任一不满足即不查快照，保持现有行为）：resp 有效、账本 nv29=true、本网已排期（solsticeEpoch>0）、
+// 快照仓储已注入、当前高度不早于激活高度、周期长度为正。
+//
+// 降级（硬要求：**不得 500**）：快照查询报错（如表 chain.reward_stream_recipient_epoch 尚未建）时打 WARN，
+// 按「只有当前链上状态」返回，接口照常可用。
+func (s StatisticRewardStreamLedgerBiz) appendDepartedRecipients(ctx context.Context, resp *filscan.RewardStreamLedgerResponse, ledger *londobell.RewardStreamLedger, curEpoch int64) {
+	if resp == nil || !resp.Nv29 || s.solsticeEpoch <= 0 || s.recipients == nil {
+		return
+	}
+	if curEpoch < s.solsticeEpoch {
+		return
+	}
+	periodLen := int64(buildconstants.SolsticeEpochsPerQuarter)
+	if periodLen <= 0 {
+		return
+	}
+	start := periodStartEpoch(s.solsticeEpoch, curEpoch, periodLen)
+	rows, err := s.recipients.ListRewardStreamRecipientsByEpochRange(ctx, chain.NewLCRCRange(chain.Epoch(start), chain.Epoch(curEpoch)))
+	if err != nil {
+		log.Warnf("reward_stream_ledger: 取本周期(%d..%d)受益方快照失败: %v，按只有当前链上状态返回", start, curEpoch, err)
+		return
+	}
+	if len(rows) == 0 {
+		return
+	}
+	resp.Recipients = mergeDepartedRecipients(resp.Recipients, rows, rewardLedgerDenom(ledger))
+}
+
+// mergeDepartedRecipients 把快照行合并到活跃排行：仅补「快照里出现过、当前排行（含已移除流遗留行）里没有」的地址，
+// 每个地址取本周期内 epoch 最大的那一行。活跃行保持原序并一律在前；离场行补在末尾，内部按跨周期结转(carried)
+// 降序（相等按地址升序）。快照地址与排行地址均归一化（SmartAddress）后比较，避免前缀差异造成漏配/重复。
+func mergeDepartedRecipients(active []*filscan.RewardStreamRecipient, rows []*po.RewardStreamRecipientEpoch, denom decimal.Decimal) []*filscan.RewardStreamRecipient {
+	present := make(map[string]struct{}, len(active))
+	for _, r := range active {
+		if r != nil {
+			present[r.Address] = struct{}{}
+		}
+	}
+
+	latest := make(map[string]*po.RewardStreamRecipientEpoch)
+	for _, row := range rows {
+		if row == nil {
+			continue
+		}
+		addr := chain.SmartAddress(row.Address).Address()
+		if _, ok := present[addr]; ok {
+			continue // 当前链上仍在（含 tombstone 遗留行）⇒ 不算离场，不补
+		}
+		if cur, ok := latest[addr]; !ok || row.Epoch > cur.Epoch {
+			latest[addr] = row
+		}
+	}
+	if len(latest) == 0 {
+		return active
+	}
+
+	type departedRecipient struct {
+		addr      string
+		leftEpoch int64
+		carried   decimal.Decimal
+		claimed   decimal.Decimal
+		lastShare string
+	}
+	departed := make([]departedRecipient, 0, len(latest))
+	for addr, row := range latest {
+		carried := nonNegative(row.Payable)
+		departed = append(departed, departedRecipient{
+			addr:      addr,
+			leftEpoch: row.Epoch,
+			carried:   carried,
+			claimed:   row.ClaimedPeriod,
+			lastShare: sharePercent(row.Share, denom),
+		})
+	}
+	// 离场行排序：跨周期结转(carried)降序，相等按地址升序（与活跃行的 pending 降序+地址升序同风格）。
+	sort.SliceStable(departed, func(i, j int) bool {
+		if c := departed[i].carried.Cmp(departed[j].carried); c != 0 {
+			return c > 0
+		}
+		return departed[i].addr < departed[j].addr
+	})
+
+	out := make([]*filscan.RewardStreamRecipient, 0, len(active)+len(departed))
+	out = append(out, active...)
+	for _, d := range departed {
+		// 离场行：当前无份额 ⇒ share_pct 记 0.00、当期应收 0；金额全部是此前结转（carried），
+		// 保持不变式 pending_claim == pending_claim_current + pending_claim_carried。
+		out = append(out, &filscan.RewardStreamRecipient{
+			Address:             d.addr,
+			SharePct:            "0.00",
+			PendingClaim:        d.carried,
+			PendingClaimCurrent: decimal.Zero,
+			PendingClaimCarried: d.carried,
+			ClaimedPeriod:       d.claimed,
+			Departed:            true,
+			LeftEpoch:           d.leftEpoch,
+			LastSharePct:        d.lastShare,
+		})
+	}
+	return out
 }

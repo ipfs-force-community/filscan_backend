@@ -23,7 +23,7 @@ func NewStatisticBiz(agg londobell.Agg, db *gorm.DB, adapter londobell.Adapter, 
 		StatisticGasDataTrend:          NewStatisticGasDataTrendBiz(dal.NewGas24hTrendBizDal(db)),
 		StatisticDcTrendBiz:            NewStatisticDcTrendBiz(dal.NewSyncerDal(db), dal.NewDcTrendDal(db)),
 		StatisticRewardStreamsBiz:      NewStatisticRewardStreamsBiz(dal.NewSyncerDal(db), agg),
-		StatisticRewardStreamLedgerBiz: NewStatisticRewardStreamLedgerBiz(dal.NewSyncerDal(db), statisticAcl),
+		StatisticRewardStreamLedgerBiz: NewStatisticRewardStreamLedgerBiz(dal.NewSyncerDal(db), statisticAcl, dal.NewRewardStreamRecipientDal(db)),
 		adapter:                        statisticAcl,
 	}
 }

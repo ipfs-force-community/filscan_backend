@@ -374,6 +374,16 @@ type RewardStreamRecipient struct {
 	// 与 RemovedStream 互斥（tombstone 命中优先）。true ⇒ 它没有新的应得，金额同样是此前结转、仍可提取的欠款。
 	// 用例（2026-10-09 cali 实测）：地址移除 ≠ 流被删，链上可能留下「流还在、份额 0」的收款人。
 	ZeroShare bool `json:"zero_share"`
+	// Departed：该受益方**本周期内已离场**——本周期快照表里出现过，但当前链上状态（活跃份额表 + 已移除流
+	// 遗留欠款）里已查不到（份额归零且欠款提完后，链上会彻底消失）。数据源为快照表
+	// chain.reward_stream_recipient_epoch；快照取数不可用（如表未建）时本字段恒 false、接口照常返回。
+	// 口径与补齐规则见 biz 层 buildRewardStreamRecipients 注释「本周期离场者」一节。
+	Departed bool `json:"departed"`
+	// LeftEpoch：离场高度 —— 本周期快照里该地址 epoch 最大的那一行的 epoch。仅 Departed=true 时有意义，其余为 0。
+	LeftEpoch int64 `json:"left_epoch"`
+	// LastSharePct：离开前的份额占比%（**口径同 SharePct**，相对 Denom、两位小数，如 "73.75"）——
+	// 取该离场地址本周期内 epoch 最大那一行的 Share 按 sharePercent 折算。仅 Departed=true 时有意义，其余为 ""。
+	LastSharePct string `json:"last_share_pct"`
 }
 
 // ClaimedPeriod 口径说明：来源是链上 f02 奖励流账本的 recipient 级 ClaimedPeriod（**当前期**口径，非累计）；
