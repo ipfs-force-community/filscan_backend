@@ -350,9 +350,14 @@ type RewardStreamSplit struct {
 }
 
 // RewardStreamRecipient 单个受益地址：share_pct 是其在份额表中的占比（相对 Denom，两位小数，
-// 与链上 RecipientShare.Share 同口径，不按 stream 权重折算）；pending_claim 是该地址可提取的欠款。
+// 与链上 RecipientShare.Share 同口径，不按 stream 权重折算）；pending_claim 是该地址可提取的欠款；
+// claimed_period 是该地址本期已提取的金额（供前端「服务受益方排行」展示「已付」列）。
 type RewardStreamRecipient struct {
-	Address      string          `json:"address"`       // 受益地址
-	SharePct     string          `json:"share_pct"`     // 份额占比%（相对 Denom），两位小数
-	PendingClaim decimal.Decimal `json:"pending_claim"` // 待付金额（attoFIL）
+	Address       string          `json:"address"`        // 受益地址
+	SharePct      string          `json:"share_pct"`      // 份额占比%（相对 Denom），两位小数
+	PendingClaim  decimal.Decimal `json:"pending_claim"`  // 待付金额（attoFIL）
+	ClaimedPeriod decimal.Decimal `json:"claimed_period"` // 该地址本期已提取金额（attoFIL 十进制字符串）
 }
+
+// ClaimedPeriod 口径说明：来源是链上 f02 奖励流账本的 recipient 级 ClaimedPeriod（**当前期**口径，非累计）；
+// tombstone（已移除流）的收款人没有该字段，取 0。

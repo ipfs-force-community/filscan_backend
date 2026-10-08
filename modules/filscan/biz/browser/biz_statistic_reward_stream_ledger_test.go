@@ -91,7 +91,8 @@ func TestRewardStreamLedgerCaliRealSnapshot(t *testing.T) {
 		t.Fatalf("claimed_period 应等于 10,378.06 FIL，得到 %s", resp.ClaimedPeriod)
 	}
 
-	// 受益方：按地址升序；share_pct = share/denom（两位小数）；pending 见链上账目计算。
+	// 受益方：按待付 pending_claim 降序（pending 相等按地址升序）；share_pct = share/denom（两位小数）；
+	// claimed_period = 各显式流 recipient 级 claimed_period 之和（tombstone 无该字段，计 0）。
 	if len(resp.Recipients) != 3 {
 		t.Fatalf("应返回 3 个受益方（2 个 live + 1 个 tombstone），得到 %d", len(resp.Recipients))
 	}
@@ -99,12 +100,14 @@ func TestRewardStreamLedgerCaliRealSnapshot(t *testing.T) {
 		addr    string
 		share   string
 		pending string
+		claimed string
 	}{
-		// 按地址升序（实现按地址字符串升序合并 live + tombstone）：
-		// t0199897 < t0200206 < t0200442 —— 修正真实地址后，tombstone 收款人 t0200206 排在两个 live 受益方之间。
-		{"t0199897", "73.75", "167662713864306783100"},
-		{"t0200206", "0.00", "4062440000000000000000"}, // tombstone：无份额、只剩未提
-		{"t0200442", "26.25", "3754277286135693216900"},
+		// 排行顺序＝待付降序：t0200206(4062.44) > t0200442(3754.28) > t0199897(167.66)。
+		// 注意 t0199897 份额最大却排最后：其本期已提取 10,378.06 FIL（claimed_period），待付被扣减 ——
+		// 这正是新增「已付」列要暴露的信息（金额取链上实测的 recipient 级 ClaimedPeriod；accrued/payable 为构造自洽值，见上）。
+		{"t0200206", "0.00", "4062440000000000000000", "0"}, // tombstone：无份额、无 claimed_period 字段（计 0），只剩未提
+		{"t0200442", "26.25", "3754277286135693216900", "0"},
+		{"t0199897", "73.75", "167662713864306783100", "10378060000000000000000"},
 	}
 	for i, w := range want {
 		got := resp.Recipients[i]
@@ -114,6 +117,20 @@ func TestRewardStreamLedgerCaliRealSnapshot(t *testing.T) {
 		if !got.PendingClaim.Equal(decimal.RequireFromString(w.pending)) {
 			t.Fatalf("recipients[%d] 待付错: got %s want %s", i, got.PendingClaim, w.pending)
 		}
+		if !got.ClaimedPeriod.Equal(decimal.RequireFromString(w.claimed)) {
+			t.Fatalf("recipients[%d] 已付 claimed_period 错: got %s want %s", i, got.ClaimedPeriod, w.claimed)
+		}
+	}
+	// 至少一条 recipient 的已付非零，确保「已付」列真的被测到（不是全 0 的空断言）。
+	nonZeroClaimed := false
+	for _, r := range resp.Recipients {
+		if r.ClaimedPeriod.IsPositive() {
+			nonZeroClaimed = true
+			break
+		}
+	}
+	if !nonZeroClaimed {
+		t.Fatal("样本里应至少有一条受益方 claimed_period 非零，否则「已付」列未被真正覆盖")
 	}
 
 	if src.calls != 1 {

@@ -146,17 +146,21 @@ func sharePercent(share, denom decimal.Decimal) string {
 	return share.Mul(decimal.NewFromInt(100)).Div(denom).Round(2).StringFixed(2)
 }
 
-// rewardStreamRecipientAgg 同一受益地址跨流的合并行（地址 / 份额 / 待付）。
+// rewardStreamRecipientAgg 同一受益地址跨流的合并行（地址 / 份额 / 待付 / 本期已提）。
 type rewardStreamRecipientAgg struct {
 	share   decimal.Decimal
 	pending decimal.Decimal
+	claimed decimal.Decimal
 }
 
-// buildRewardStreamRecipients 汇总各受益地址的份额%与待付。
+// buildRewardStreamRecipients 汇总各受益地址的份额%、待付与本期已提。
 //
-// 按地址合并（同一地址出现在多条流时份额与待付相加）。待付口径与 actor 一致：
+// 按地址合并（同一地址出现在多条流时份额、待付、已提相加）。待付口径与 actor 一致：
 //   - 显式流行 = 当前期应得(accrued × share / denom) − 当期已提(claimed_period) + 结转未提(payable)；
-//   - tombstone 行 = 结转未提(payable)（被移除的流已无份额，share_pct 记 0.00）。
+//   - tombstone 行 = 结转未提(payable)（被移除的流已无份额，share_pct 记 0.00，且无 claimed_period 字段、已提取 0）。
+//
+// 输出顺序＝「服务受益方排行」顺序：按待付 pending_claim 降序，pending 相等时按地址升序（稳定）；
+// 不做截断，全部返回（前端按序取前 N）。
 func buildRewardStreamRecipients(ledger *londobell.RewardStreamLedger, denom decimal.Decimal) []*filscan.RewardStreamRecipient {
 	agg := make(map[string]*rewardStreamRecipientAgg)
 	get := func(addr string) *rewardStreamRecipientAgg {
@@ -180,6 +184,7 @@ func buildRewardStreamRecipients(ledger *londobell.RewardStreamLedger, denom dec
 			e.share = e.share.Add(r.Share)
 			current := mulDiv(st.Accrued, r.Share, denom)
 			e.pending = e.pending.Add(current).Add(r.Payable).Sub(r.ClaimedPeriod)
+			e.claimed = e.claimed.Add(r.ClaimedPeriod)
 		}
 	}
 	for _, t := range ledger.Tombstones {
@@ -199,15 +204,25 @@ func buildRewardStreamRecipients(ledger *londobell.RewardStreamLedger, denom dec
 	for addr := range agg {
 		addresses = append(addresses, addr)
 	}
-	sort.Strings(addresses)
+	// 排行表顺序（前端「服务受益方排行」）：按待付 pending_claim 降序；pending 相等时按地址升序（稳定）。
+	// 用 decimal 精确比较，**不转 float64**（attoFIL 值远超 float64 有效位数，转 float 会丢精度导致排序错）。
+	// 不做 limit / 截断，全部返回。
+	sort.SliceStable(addresses, func(i, j int) bool {
+		pi, pj := agg[addresses[i]].pending, agg[addresses[j]].pending
+		if c := pi.Cmp(pj); c != 0 {
+			return c > 0
+		}
+		return addresses[i] < addresses[j]
+	})
 
 	out := make([]*filscan.RewardStreamRecipient, 0, len(addresses))
 	for _, addr := range addresses {
 		e := agg[addr]
 		out = append(out, &filscan.RewardStreamRecipient{
-			Address:      chain.SmartAddress(addr).Address(),
-			SharePct:     sharePercent(e.share, denom),
-			PendingClaim: e.pending,
+			Address:       chain.SmartAddress(addr).Address(),
+			SharePct:      sharePercent(e.share, denom),
+			PendingClaim:  e.pending,
+			ClaimedPeriod: e.claimed,
 		})
 	}
 	return out
