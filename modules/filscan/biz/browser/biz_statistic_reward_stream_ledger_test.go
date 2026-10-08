@@ -116,7 +116,7 @@ func (f *fakeRewardStreamLedgerSource) GetRewardStreamLedger(_ context.Context, 
 // NV29 已激活：分账比例＝评估权重百分比（50/45/5）、份额%＝share/denom、待提取＝liability 直通。
 func TestRewardStreamLedgerCaliRealSnapshot(t *testing.T) {
 	src := &fakeRewardStreamLedgerSource{ledger: mustLedger(t, caliLedgerJSON)}
-	biz := NewStatisticRewardStreamLedgerBiz(&fakeRewardStreamsSyncer{epoch: 4110339}, src, &fakeRewardStreamRecipientSnapshot{})
+	biz := NewStatisticRewardStreamLedgerBiz(&fakeRewardStreamsSyncer{epoch: 4110339}, src, &fakeRewardStreamRecipientSnapshot{}, &fakeRewardStreamRecipientSnapshot{})
 
 	resp, err := biz.RewardStreamLedger(context.Background(), filscan.RewardStreamLedgerRequest{})
 	if err != nil {
@@ -242,7 +242,7 @@ const caliZeroShareLedgerJSON = `{
 // 两行都是 0.00% 但来源不同，前端据此各给一句说明。
 func TestRewardStreamLedgerZeroShareLiveStream(t *testing.T) {
 	src := &fakeRewardStreamLedgerSource{ledger: mustLedger(t, caliZeroShareLedgerJSON)}
-	biz := NewStatisticRewardStreamLedgerBiz(&fakeRewardStreamsSyncer{epoch: 4139065}, src, &fakeRewardStreamRecipientSnapshot{})
+	biz := NewStatisticRewardStreamLedgerBiz(&fakeRewardStreamsSyncer{epoch: 4139065}, src, &fakeRewardStreamRecipientSnapshot{}, &fakeRewardStreamRecipientSnapshot{})
 
 	resp, err := biz.RewardStreamLedger(context.Background(), filscan.RewardStreamLedgerRequest{})
 	if err != nil {
@@ -291,7 +291,7 @@ func TestRewardStreamLedgerZeroShareLiveStream(t *testing.T) {
 func TestRewardStreamLedgerV18FallsBack(t *testing.T) {
 	logs := captureBizLogs(t)
 	v18 := &londobell.RewardStreamLedger{Epoch: 6429840, Nv29: false, Denom: decimal.RequireFromString("1000000000000000000")}
-	biz := NewStatisticRewardStreamLedgerBiz(&fakeRewardStreamsSyncer{epoch: 6429840}, &fakeRewardStreamLedgerSource{ledger: v18}, &fakeRewardStreamRecipientSnapshot{})
+	biz := NewStatisticRewardStreamLedgerBiz(&fakeRewardStreamsSyncer{epoch: 6429840}, &fakeRewardStreamLedgerSource{ledger: v18}, &fakeRewardStreamRecipientSnapshot{}, &fakeRewardStreamRecipientSnapshot{})
 
 	resp, err := biz.RewardStreamLedger(context.Background(), filscan.RewardStreamLedgerRequest{})
 	if err != nil {
@@ -318,7 +318,7 @@ func TestRewardStreamLedgerV18FallsBack(t *testing.T) {
 func TestRewardStreamLedgerFetchErrorFallsBack(t *testing.T) {
 	logs := captureBizLogs(t)
 	src := &fakeRewardStreamLedgerSource{err: errors.New("boom")}
-	biz := NewStatisticRewardStreamLedgerBiz(&fakeRewardStreamsSyncer{epoch: 6429840}, src, &fakeRewardStreamRecipientSnapshot{})
+	biz := NewStatisticRewardStreamLedgerBiz(&fakeRewardStreamsSyncer{epoch: 6429840}, src, &fakeRewardStreamRecipientSnapshot{}, &fakeRewardStreamRecipientSnapshot{})
 
 	resp, err := biz.RewardStreamLedger(context.Background(), filscan.RewardStreamLedgerRequest{})
 	if err != nil {
@@ -337,7 +337,7 @@ func TestRewardStreamLedgerFetchErrorFallsBack(t *testing.T) {
 
 // 同步器高度取不到：同样回退 nv29=false，不报错、不 500。
 func TestRewardStreamLedgerSyncerErrorFallsBack(t *testing.T) {
-	biz := NewStatisticRewardStreamLedgerBiz(&fakeRewardStreamsSyncer{err: errors.New("db down")}, &fakeRewardStreamLedgerSource{}, &fakeRewardStreamRecipientSnapshot{})
+	biz := NewStatisticRewardStreamLedgerBiz(&fakeRewardStreamsSyncer{err: errors.New("db down")}, &fakeRewardStreamLedgerSource{}, &fakeRewardStreamRecipientSnapshot{}, &fakeRewardStreamRecipientSnapshot{})
 	resp, err := biz.RewardStreamLedger(context.Background(), filscan.RewardStreamLedgerRequest{})
 	if err != nil {
 		t.Fatalf("同步器失败不得向上抛错: %s", err)
@@ -398,7 +398,7 @@ func TestRewardStreamLedgerDepartedAppended(t *testing.T) {
 		{Epoch: cur - 900, Address: "t0300111", Share: decimal.RequireFromString("300000000000000000"), Payable: decimal.RequireFromString("111000000000000000000")},
 		{Epoch: cur - 50, Address: "t0300111", Share: decimal.RequireFromString("737500000000000000"), Payable: decimal.RequireFromString("222000000000000000000"), ClaimedPeriod: decimal.RequireFromString("42000000000000000000")},
 	}}
-	biz := NewStatisticRewardStreamLedgerBiz(&fakeRewardStreamsSyncer{epoch: cur}, &fakeRewardStreamLedgerSource{ledger: departedActiveLedger(cur)}, snap)
+	biz := NewStatisticRewardStreamLedgerBiz(&fakeRewardStreamsSyncer{epoch: cur}, &fakeRewardStreamLedgerSource{ledger: departedActiveLedger(cur)}, snap, snap)
 	biz.solsticeEpoch = solstice
 
 	resp, err := biz.RewardStreamLedger(context.Background(), filscan.RewardStreamLedgerRequest{})
@@ -455,7 +455,7 @@ func TestRewardStreamLedgerDepartedSnapshotErrorDegrades(t *testing.T) {
 	cur := solstice + 5
 	logs := captureBizLogs(t)
 	snap := &fakeRewardStreamRecipientSnapshot{err: errors.New(`relation "chain.reward_stream_recipient_epoch" does not exist`)}
-	biz := NewStatisticRewardStreamLedgerBiz(&fakeRewardStreamsSyncer{epoch: cur}, &fakeRewardStreamLedgerSource{ledger: departedActiveLedger(cur)}, snap)
+	biz := NewStatisticRewardStreamLedgerBiz(&fakeRewardStreamsSyncer{epoch: cur}, &fakeRewardStreamLedgerSource{ledger: departedActiveLedger(cur)}, snap, snap)
 	biz.solsticeEpoch = solstice
 
 	resp, err := biz.RewardStreamLedger(context.Background(), filscan.RewardStreamLedgerRequest{})
@@ -485,7 +485,7 @@ func TestRewardStreamLedgerDepartedNotQueriedWhenInactive(t *testing.T) {
 	// 情形一：账本 nv29=false（本网未激活）。
 	v18 := &londobell.RewardStreamLedger{Epoch: cur, Nv29: false, Denom: decimal.RequireFromString("1000000000000000000")}
 	snap1 := &fakeRewardStreamRecipientSnapshot{}
-	biz1 := NewStatisticRewardStreamLedgerBiz(&fakeRewardStreamsSyncer{epoch: cur}, &fakeRewardStreamLedgerSource{ledger: v18}, snap1)
+	biz1 := NewStatisticRewardStreamLedgerBiz(&fakeRewardStreamsSyncer{epoch: cur}, &fakeRewardStreamLedgerSource{ledger: v18}, snap1, snap1)
 	biz1.solsticeEpoch = solstice
 	if _, err := biz1.RewardStreamLedger(context.Background(), filscan.RewardStreamLedgerRequest{}); err != nil {
 		t.Fatalf("不应报错: %s", err)
@@ -496,7 +496,7 @@ func TestRewardStreamLedgerDepartedNotQueriedWhenInactive(t *testing.T) {
 
 	// 情形二：本网未排期（solsticeEpoch=0）。
 	snap2 := &fakeRewardStreamRecipientSnapshot{}
-	biz2 := NewStatisticRewardStreamLedgerBiz(&fakeRewardStreamsSyncer{epoch: cur}, &fakeRewardStreamLedgerSource{ledger: departedActiveLedger(cur)}, snap2)
+	biz2 := NewStatisticRewardStreamLedgerBiz(&fakeRewardStreamsSyncer{epoch: cur}, &fakeRewardStreamLedgerSource{ledger: departedActiveLedger(cur)}, snap2, snap2)
 	biz2.solsticeEpoch = 0
 	if _, err := biz2.RewardStreamLedger(context.Background(), filscan.RewardStreamLedgerRequest{}); err != nil {
 		t.Fatalf("不应报错: %s", err)
@@ -507,7 +507,7 @@ func TestRewardStreamLedgerDepartedNotQueriedWhenInactive(t *testing.T) {
 
 	// 情形三：当前高度早于激活高度。
 	snap3 := &fakeRewardStreamRecipientSnapshot{}
-	biz3 := NewStatisticRewardStreamLedgerBiz(&fakeRewardStreamsSyncer{epoch: solstice - 1}, &fakeRewardStreamLedgerSource{ledger: departedActiveLedger(solstice - 1)}, snap3)
+	biz3 := NewStatisticRewardStreamLedgerBiz(&fakeRewardStreamsSyncer{epoch: solstice - 1}, &fakeRewardStreamLedgerSource{ledger: departedActiveLedger(solstice - 1)}, snap3, snap3)
 	biz3.solsticeEpoch = solstice
 	if _, err := biz3.RewardStreamLedger(context.Background(), filscan.RewardStreamLedgerRequest{}); err != nil {
 		t.Fatalf("不应报错: %s", err)
@@ -526,7 +526,7 @@ func TestRewardStreamLedgerDepartedOrderByCarriedDesc(t *testing.T) {
 		{Epoch: cur - 2, Address: "t0300201", Share: decimal.RequireFromString("200000000000000000"), Payable: decimal.RequireFromString("900000000000000000000")},
 		{Epoch: cur - 1, Address: "t0300200", Share: decimal.RequireFromString("300000000000000000"), Payable: decimal.RequireFromString("500000000000000000000")},
 	}}
-	biz := NewStatisticRewardStreamLedgerBiz(&fakeRewardStreamsSyncer{epoch: cur}, &fakeRewardStreamLedgerSource{ledger: departedActiveLedger(cur)}, snap)
+	biz := NewStatisticRewardStreamLedgerBiz(&fakeRewardStreamsSyncer{epoch: cur}, &fakeRewardStreamLedgerSource{ledger: departedActiveLedger(cur)}, snap, snap)
 	biz.solsticeEpoch = solstice
 
 	resp, err := biz.RewardStreamLedger(context.Background(), filscan.RewardStreamLedgerRequest{})
@@ -589,7 +589,7 @@ func TestRewardStreamLedgerClaimedTotalSumAcrossPeriods(t *testing.T) {
 		},
 		earliest: chain.Epoch(prev + 1), earliestFound: true,
 	}
-	biz := NewStatisticRewardStreamLedgerBiz(&fakeRewardStreamsSyncer{epoch: cur}, &fakeRewardStreamLedgerSource{ledger: departedActiveLedger(cur)}, snap)
+	biz := NewStatisticRewardStreamLedgerBiz(&fakeRewardStreamsSyncer{epoch: cur}, &fakeRewardStreamLedgerSource{ledger: departedActiveLedger(cur)}, snap, snap)
 	biz.solsticeEpoch = solstice
 
 	resp, err := biz.RewardStreamLedger(context.Background(), filscan.RewardStreamLedgerRequest{})
@@ -647,7 +647,7 @@ func TestRewardStreamLedgerClaimedTotalNilWhenNoCurrentPeriodRows(t *testing.T) 
 		},
 		earliest: chain.Epoch(solstice + 1), earliestFound: true,
 	}
-	biz := NewStatisticRewardStreamLedgerBiz(&fakeRewardStreamsSyncer{epoch: cur}, &fakeRewardStreamLedgerSource{ledger: departedActiveLedger(cur)}, snap)
+	biz := NewStatisticRewardStreamLedgerBiz(&fakeRewardStreamsSyncer{epoch: cur}, &fakeRewardStreamLedgerSource{ledger: departedActiveLedger(cur)}, snap, snap)
 	biz.solsticeEpoch = solstice
 
 	resp, err := biz.RewardStreamLedger(context.Background(), filscan.RewardStreamLedgerRequest{})
@@ -692,7 +692,7 @@ func TestRewardStreamLedgerClaimedTotalZeroWhenAddressHasNoRows(t *testing.T) {
 		},
 		earliest: chain.Epoch(cur - 1), earliestFound: true,
 	}
-	biz := NewStatisticRewardStreamLedgerBiz(&fakeRewardStreamsSyncer{epoch: cur}, &fakeRewardStreamLedgerSource{ledger: departedActiveLedger(cur)}, snap)
+	biz := NewStatisticRewardStreamLedgerBiz(&fakeRewardStreamsSyncer{epoch: cur}, &fakeRewardStreamLedgerSource{ledger: departedActiveLedger(cur)}, snap, snap)
 	biz.solsticeEpoch = solstice
 
 	resp, err := biz.RewardStreamLedger(context.Background(), filscan.RewardStreamLedgerRequest{})
@@ -726,7 +726,7 @@ func TestRewardStreamLedgerDepartedFromPeriodOnly(t *testing.T) {
 			periodRow("t0300111", start, cur-30, cur-3, "42000000000000000000", "737500000000000000"),
 		},
 	}
-	biz := NewStatisticRewardStreamLedgerBiz(&fakeRewardStreamsSyncer{epoch: cur}, &fakeRewardStreamLedgerSource{ledger: departedActiveLedger(cur)}, snap)
+	biz := NewStatisticRewardStreamLedgerBiz(&fakeRewardStreamsSyncer{epoch: cur}, &fakeRewardStreamLedgerSource{ledger: departedActiveLedger(cur)}, snap, snap)
 	biz.solsticeEpoch = solstice
 
 	resp, err := biz.RewardStreamLedger(context.Background(), filscan.RewardStreamLedgerRequest{})
@@ -769,7 +769,7 @@ func TestRewardStreamLedgerClaimedAndDepartedSourcesErrorDegrade(t *testing.T) {
 		periodByAddrErr: errors.New("boom"),
 		earliestErr:     errors.New("boom"),
 	}
-	biz := NewStatisticRewardStreamLedgerBiz(&fakeRewardStreamsSyncer{epoch: cur}, &fakeRewardStreamLedgerSource{ledger: departedActiveLedger(cur)}, snap)
+	biz := NewStatisticRewardStreamLedgerBiz(&fakeRewardStreamsSyncer{epoch: cur}, &fakeRewardStreamLedgerSource{ledger: departedActiveLedger(cur)}, snap, snap)
 	biz.solsticeEpoch = solstice
 
 	resp, err := biz.RewardStreamLedger(context.Background(), filscan.RewardStreamLedgerRequest{})
@@ -815,7 +815,7 @@ func TestRewardStreamLedgerClaimedTotalDiffersFromCurrentPeriod(t *testing.T) {
 		earliest: chain.Epoch(cur - 1), earliestFound: true,
 	}
 	// 这份账本里 t0200442 是「活跃流、份额 0」：当期应计 0、本期已提 0，但历史已提 5 FIL 藏在归集表。
-	biz := NewStatisticRewardStreamLedgerBiz(&fakeRewardStreamsSyncer{epoch: cur}, &fakeRewardStreamLedgerSource{ledger: mustLedger(t, caliZeroShareLedgerJSON)}, snap)
+	biz := NewStatisticRewardStreamLedgerBiz(&fakeRewardStreamsSyncer{epoch: cur}, &fakeRewardStreamLedgerSource{ledger: mustLedger(t, caliZeroShareLedgerJSON)}, snap, snap)
 	biz.solsticeEpoch = solstice
 
 	resp, err := biz.RewardStreamLedger(context.Background(), filscan.RewardStreamLedgerRequest{})

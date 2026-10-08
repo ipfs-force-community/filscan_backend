@@ -34,26 +34,27 @@ type rewardStreamLedgerSource interface {
 	GetRewardStreamLedger(ctx context.Context, epoch *chain.Epoch) (*londobell.RewardStreamLedger, error)
 }
 
-// rewardStreamRecipientSource 「本周期受益方来源」取数能力（窄接口，便于单测注入假实现）。
-// 覆盖两路只读来源：
-//   - 快照（按高度 chain.reward_stream_recipient_epoch）：可被框架 HistoryClear 修剪，仅作 last_share 补充；
-//   - 归集（按周期 chain.reward_stream_recipient_period）：只增不减、跨周期保留，是「累计已收」与
-//     「本周期离场」的可靠来源。
-//
-// 由 dal.RewardStreamRecipientDal 满足（它把归集表只读方法转发给内部 period dal，
-// 使生产装配 biz_statistic.go 无需改动即可同时提供两路来源）。
-type rewardStreamRecipientSource interface {
+// rewardStreamRecipientSnapshotSource 快照来源（按高度 chain.reward_stream_recipient_epoch）只读能力。
+// 由 dal.RewardStreamRecipientDal 满足。快照可被框架 HistoryClear 修剪，仅作「离开前份额」的精度补充。
+type rewardStreamRecipientSnapshotSource interface {
 	ListRewardStreamRecipientsByEpochRange(ctx context.Context, epochs chain.LCRCRange) ([]*po.RewardStreamRecipientEpoch, error)
+}
+
+// rewardStreamRecipientPeriodSource 归集来源（按周期 chain.reward_stream_recipient_period）只读能力。
+// 由 dal.RewardStreamRecipientPeriodDal 满足。归集表只增不减、跨周期保留，是「累计已收」与
+// 「本周期离场」的可靠来源（快照表会被 HistoryClear 按高度修剪，主网周期长达 91 天，靠它判定会漏人）。
+type rewardStreamRecipientPeriodSource interface {
 	ListRewardStreamRecipientPeriodsByAddresses(ctx context.Context, addresses []string) ([]*po.RewardStreamRecipientPeriod, error)
 	ListRewardStreamRecipientPeriodsByPeriodStart(ctx context.Context, periodStart chain.Epoch) ([]*po.RewardStreamRecipientPeriod, error)
 	EarliestRewardStreamRecipientPeriodEpoch(ctx context.Context) (epoch chain.Epoch, found bool, err error)
 }
 
-func NewStatisticRewardStreamLedgerBiz(se repository.SyncerGetter, ledger rewardStreamLedgerSource, recipients rewardStreamRecipientSource) *StatisticRewardStreamLedgerBiz {
+func NewStatisticRewardStreamLedgerBiz(se repository.SyncerGetter, ledger rewardStreamLedgerSource, snapshot rewardStreamRecipientSnapshotSource, period rewardStreamRecipientPeriodSource) *StatisticRewardStreamLedgerBiz {
 	return &StatisticRewardStreamLedgerBiz{
 		se:            se,
 		ledger:        ledger,
-		recipients:    recipients,
+		snapshot:      snapshot,
+		period:        period,
 		solsticeEpoch: nv29EpochOrZero(message_detail.UpgradeSolsticeHeight.Int64()),
 	}
 }
@@ -63,9 +64,10 @@ var _ filscan.StatisticRewardStreamLedger = (*StatisticRewardStreamLedgerBiz)(ni
 type StatisticRewardStreamLedgerBiz struct {
 	se     repository.SyncerGetter
 	ledger rewardStreamLedgerSource
-	// recipients 「本周期受益方来源」只读取（快照 + 归集，用来补本周期离场者与「累计已收」）。
-	// 表未建 / 未注入时为 nil ⇒ 只按当前链上状态返回。
-	recipients rewardStreamRecipientSource
+	// snapshot 快照来源（按高度）：仅用于「离开前份额」的精度补充；表未建 / 未注入为 nil ⇒ 跳过。
+	snapshot rewardStreamRecipientSnapshotSource
+	// period 归集来源（按周期）：「累计已收」与「本周期离场」的主来源；表未建 / 未注入为 nil ⇒ 跳过。
+	period rewardStreamRecipientPeriodSource
 	// solsticeEpoch 本网 NV29 激活高度（未排期 ⇒ 0，见 nv29EpochOrZero）；为 0 时不查快照。
 	// 构造时取 message_detail.UpgradeSolsticeHeight；单测可覆盖此字段以在默认（mainnet）构建下演练已激活路径。
 	solsticeEpoch int64
@@ -355,7 +357,7 @@ func periodStartEpoch(nv29Epoch, curEpoch, periodLen int64) int64 {
 //
 // 降级（硬要求：**不得 500**）：任一来源查询报错（如表尚未建）时打 WARN、该来源按空处理，接口照常可用。
 func (s StatisticRewardStreamLedgerBiz) appendDepartedRecipients(ctx context.Context, resp *filscan.RewardStreamLedgerResponse, ledger *londobell.RewardStreamLedger, curEpoch int64) {
-	if resp == nil || !resp.Nv29 || s.solsticeEpoch <= 0 || s.recipients == nil {
+	if resp == nil || !resp.Nv29 || s.solsticeEpoch <= 0 || (s.snapshot == nil && s.period == nil) {
 		return
 	}
 	if curEpoch < s.solsticeEpoch {
@@ -368,13 +370,13 @@ func (s StatisticRewardStreamLedgerBiz) appendDepartedRecipients(ctx context.Con
 	start := periodStartEpoch(s.solsticeEpoch, curEpoch, periodLen)
 
 	// 快照来源：可能被框架 HistoryClear 修剪，取数失败按空处理。
-	snapRows, err := s.recipients.ListRewardStreamRecipientsByEpochRange(ctx, chain.NewLCRCRange(chain.Epoch(start), chain.Epoch(curEpoch)))
+	snapRows, err := s.snapshot.ListRewardStreamRecipientsByEpochRange(ctx, chain.NewLCRCRange(chain.Epoch(start), chain.Epoch(curEpoch)))
 	if err != nil {
 		log.Warnf("reward_stream_ledger: 取本周期(%d..%d)受益方快照失败: %v，快照来源按空处理", start, curEpoch, err)
 		snapRows = nil
 	}
 	// 归集来源：只增不减，是「本周期离场」判定的可靠来源，取数失败按空处理。
-	periodRows, err := s.recipients.ListRewardStreamRecipientPeriodsByPeriodStart(ctx, chain.Epoch(start))
+	periodRows, err := s.period.ListRewardStreamRecipientPeriodsByPeriodStart(ctx, chain.Epoch(start))
 	if err != nil {
 		log.Warnf("reward_stream_ledger: 取本周期(起点 %d)受益方归集失败: %v，归集来源按空处理", start, err)
 		periodRows = nil
@@ -509,7 +511,7 @@ func mergeDepartedRecipients(active []*filscan.RewardStreamRecipient, snapRows [
 //     （真的没过提取），响应 ClaimedSinceEpoch=MIN(first_epoch)。
 //   - 查询失败一律降级（打 WARN、全 nil、since=0），接口不得 500。
 func (s StatisticRewardStreamLedgerBiz) attachClaimedTotals(ctx context.Context, resp *filscan.RewardStreamLedgerResponse, curEpoch int64) {
-	if resp == nil || !resp.Nv29 || s.recipients == nil || s.solsticeEpoch <= 0 || curEpoch < s.solsticeEpoch {
+	if resp == nil || !resp.Nv29 || s.period == nil || s.solsticeEpoch <= 0 || curEpoch < s.solsticeEpoch {
 		return
 	}
 	periodLen := int64(buildconstants.SolsticeEpochsPerQuarter)
@@ -519,7 +521,7 @@ func (s StatisticRewardStreamLedgerBiz) attachClaimedTotals(ctx context.Context,
 	start := periodStartEpoch(s.solsticeEpoch, curEpoch, periodLen)
 
 	// 探针：本周期是否已有归集行。没有 ⇒ 累计未知（全部 nil、since=0），不臆造 0。
-	periodRows, err := s.recipients.ListRewardStreamRecipientPeriodsByPeriodStart(ctx, chain.Epoch(start))
+	periodRows, err := s.period.ListRewardStreamRecipientPeriodsByPeriodStart(ctx, chain.Epoch(start))
 	if err != nil {
 		log.Warnf("reward_stream_ledger: 取本周期(起点 %d)受益方归集失败: %v，累计已收按未知(nil)降级", start, err)
 		return
@@ -541,7 +543,7 @@ func (s StatisticRewardStreamLedgerBiz) attachClaimedTotals(ctx context.Context,
 		seen[r.Address] = struct{}{}
 		addrs = append(addrs, r.Address)
 	}
-	rows, err := s.recipients.ListRewardStreamRecipientPeriodsByAddresses(ctx, addrs)
+	rows, err := s.period.ListRewardStreamRecipientPeriodsByAddresses(ctx, addrs)
 	if err != nil {
 		log.Warnf("reward_stream_ledger: 取受益方累计归集失败: %v，累计已收按未知(nil)降级", err)
 		return
@@ -567,7 +569,7 @@ func (s StatisticRewardStreamLedgerBiz) attachClaimedTotals(ctx context.Context,
 	}
 
 	// 全局起始高度 = MIN(first_epoch)；查询失败保持 0（未知）。
-	earliest, found, err := s.recipients.EarliestRewardStreamRecipientPeriodEpoch(ctx)
+	earliest, found, err := s.period.EarliestRewardStreamRecipientPeriodEpoch(ctx)
 	if err != nil {
 		log.Warnf("reward_stream_ledger: 取累计归集起始高度失败: %v，claimed_since_epoch 记 0", err)
 		return

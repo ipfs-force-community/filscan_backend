@@ -147,6 +147,10 @@ func (r *fakePeriodRepo) UpsertRewardStreamRecipientPeriods(_ context.Context, i
 		if it.LastEpoch > cur.LastEpoch {
 			cur.LastEpoch = it.LastEpoch
 		}
+		// last_share：取「观测高度更大」那一行的值（与真实 dal 的 CASE WHEN excluded.last_epoch >= 已存 一致）。
+		if it.LastEpoch >= cur.LastEpoch {
+			cur.LastShare = it.LastShare
+		}
 	}
 	return nil
 }
@@ -412,6 +416,40 @@ func TestCalcRollBackAndHistoryClearBounds(t *testing.T) {
 // ============ 归集表（chain.reward_stream_recipient_period）用例 ============
 
 // ① 同一 (address, 周期) 跨多个高度取**最大值**（GREATEST），不是被最后一个高度覆盖。
+// TestPeriodLastShareWriterNewestWins 锁住「离开前份额」的数据源：
+// 归集行必须记录该周期内最近一次观测到的份额（新高度覆盖、旧高度回放不覆盖）。
+func TestPeriodLastShareWriterNewestWins(t *testing.T) {
+	repo := newFakeRecipientRepo()
+	periodRepo := newFakePeriodRepo()
+	adapter := &fakeLedgerAdapter{}
+	calc := calc_reward_stream_recipient_task.NewCalcRewardStreamRecipientTaskWithPeriod(repo, periodRepo, 0, 1000)
+
+	// 高度 10：份额 100 ⇒ 归集行 last_share = 100。
+	adapter.ledger = mkLedger(10, []*londobell.RewardStreamLedgerStream{mkStream(1, false, mkRec("t01", 100, 0, 0))}, nil)
+	require.NoError(t, calc.Calc(syncer.NewTestContext(adapter, nil, chain.Epoch(10))))
+	row := periodRepo.get("t01", 0)
+	require.NotNil(t, row)
+	require.Equal(t, "100", row.LastShare.String(), "归集行必须写入该高度的份额")
+
+	// 高度 20：份额 250 ⇒ 更新的观测覆盖。
+	adapter.ledger = mkLedger(20, []*londobell.RewardStreamLedgerStream{mkStream(1, false, mkRec("t01", 250, 0, 0))}, nil)
+	require.NoError(t, calc.Calc(syncer.NewTestContext(adapter, nil, chain.Epoch(20))))
+	require.Equal(t, "250", periodRepo.get("t01", 0).LastShare.String(), "更新高度的份额覆盖旧值")
+
+	// 高度 15（回放/重排）：份额 1 ⇒ 旧观测不得覆盖较新的值。
+	adapter.ledger = mkLedger(15, []*londobell.RewardStreamLedgerStream{mkStream(1, false, mkRec("t01", 1, 0, 0))}, nil)
+	require.NoError(t, calc.Calc(syncer.NewTestContext(adapter, nil, chain.Epoch(15))))
+	require.Equal(t, "250", periodRepo.get("t01", 0).LastShare.String(), "较旧高度的份额不得覆盖较新观测")
+
+	// 多流同地址：同一高度按地址累加份额（口径同快照表 Share）。
+	adapter.ledger = mkLedger(30, []*londobell.RewardStreamLedgerStream{
+		mkStream(1, false, mkRec("t01", 30, 0, 0)),
+		mkStream(2, false, mkRec("t01", 70, 0, 0)),
+	}, nil)
+	require.NoError(t, calc.Calc(syncer.NewTestContext(adapter, nil, chain.Epoch(30))))
+	require.Equal(t, "100", periodRepo.get("t01", 0).LastShare.String(), "同一高度多流按地址累加份额")
+}
+
 func TestPeriodSameAddressSamePeriodTakesMaxNotLast(t *testing.T) {
 	repo := newFakeRecipientRepo()
 	periodRepo := newFakePeriodRepo()
@@ -628,6 +666,10 @@ func TestPeriodDalUpsertMergeAndDeleteBounds(t *testing.T) {
 	require.Contains(t, upsert, "greatest", "claimed_in_period 合并取 GREATEST")
 	require.Contains(t, upsert, "least", "first_epoch 合并取 LEAST")
 	require.Contains(t, upsert, "excluded", "命中冲突时引用新值")
+	// last_share 合并：只在「新观测不比已存更旧」时替换（离场行的「离开前份额」靠它）。
+	require.Contains(t, upsert, "last_share", "SQL 含 last_share 列")
+	require.Contains(t, upsert, "case when", "last_share 用 CASE 决定取哪一行的值")
+	require.Contains(t, upsert, "excluded.last_share", "last_share 命中冲突时引用新值")
 	require.Contains(t, upsert, "period_start_epoch", "SQL 含周期起点列")
 
 	// RollBack 方向：delete where last_epoch >= gteEpoch（且不得是 <=）。

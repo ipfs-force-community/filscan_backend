@@ -250,6 +250,7 @@ func buildRecipientPeriodRows(epoch, nv29Epoch, periodLen int64, ledger *londobe
 					Address:          r.Address,
 					PeriodStartEpoch: periodStart,
 					ClaimedInPeriod:  decimal.Zero,
+					LastShare:        decimal.Zero,
 					FirstEpoch:       epoch,
 					LastEpoch:        epoch,
 				}
@@ -257,6 +258,9 @@ func buildRecipientPeriodRows(epoch, nv29Epoch, periodLen int64, ledger *londobe
 				order = append(order, r.Address)
 			}
 			e.ClaimedInPeriod = e.ClaimedInPeriod.Add(r.ClaimedPeriod)
+			// 该周期内最近一次观测到的份额（按地址跨显式流累加，口径同快照表 Share）；
+			// dal 合并写按 LastEpoch 取更新的那一行 —— 离场行据此显示「离开前份额」。
+			e.LastShare = e.LastShare.Add(r.Share)
 		}
 	}
 
