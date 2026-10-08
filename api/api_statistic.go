@@ -358,11 +358,18 @@ type RewardStreamSplit struct {
 // 链上仍挂在该地址名下、随时可 Claim 的结转余额。供前端在这类行上加「已移除流」标记与悬停说明。
 // **不得**用 share_pct == 0 的启发式代替本字段：份额恰好为 0.00% 的活跃流会被误标。
 type RewardStreamRecipient struct {
-	Address       string          `json:"address"`        // 受益地址
-	SharePct      string          `json:"share_pct"`      // 份额占比%（相对 Denom），两位小数
-	PendingClaim  decimal.Decimal `json:"pending_claim"`  // 待付金额（attoFIL）
-	ClaimedPeriod decimal.Decimal `json:"claimed_period"` // 该地址本期已提取金额（attoFIL 十进制字符串）
-	RemovedStream bool            `json:"removed_stream"` // 只出现在已移除流的遗留欠款里且当前份额为 0 ⇒ 遗留欠款收款人（true）
+	Address      string          `json:"address"`       // 受益地址
+	SharePct     string          `json:"share_pct"`     // 份额占比%（相对 Denom），两位小数
+	PendingClaim decimal.Decimal `json:"pending_claim"` // 待付总额（attoFIL）＝ pending_claim_current + pending_claim_carried
+	// PendingClaimCurrent：**当期**应收 ＝ 本期应计（accrued×share/denom）− 本期已提（claimed_period），不小于 0。
+	// 链上依据：reward State.Accrued 注释为「current-period accrual」，ClaimedPeriod 为「current-period withdrawals」。
+	PendingClaimCurrent decimal.Decimal `json:"pending_claim_current"`
+	// PendingClaimCarried：**跨周期**应收 ＝ 此前各期已结算但未提取的结转（链上 Payable，
+	// 注释为「settled but unclaimed amounts from prior periods」；已移除流的 tombstone 结转也计入）。
+	// 分列口径（显示约定，保证两列之和恒等于 pending_claim）：本期提取先冲抵本期应计，超出部分再冲抵跨周期结转。
+	PendingClaimCarried decimal.Decimal `json:"pending_claim_carried"`
+	ClaimedPeriod       decimal.Decimal `json:"claimed_period"` // 该地址本期已提取金额（attoFIL 十进制字符串）
+	RemovedStream       bool            `json:"removed_stream"` // 只出现在已移除流的遗留欠款里且当前份额为 0 ⇒ 遗留欠款收款人（true）
 	// ZeroShare：该地址仍在**当前活跃的**服务流份额表里，但份额就是 0（该流本轮没给它分配权重）——
 	// 与 RemovedStream 互斥（tombstone 命中优先）。true ⇒ 它没有新的应得，金额同样是此前结转、仍可提取的欠款。
 	// 用例（2026-10-09 cali 实测）：地址移除 ≠ 流被删，链上可能留下「流还在、份额 0」的收款人。

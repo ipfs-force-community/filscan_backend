@@ -148,7 +148,11 @@ func sharePercent(share, denom decimal.Decimal) string {
 
 // rewardStreamRecipientAgg 同一受益地址跨流的合并行（地址 / 份额 / 待付 / 本期已提）。
 type rewardStreamRecipientAgg struct {
-	share   decimal.Decimal
+	share decimal.Decimal
+	// accrual 本期应计（Σ accrued×share/denom，仅显式流）；payable 跨周期结转（Σ 链上 Payable，含 tombstone）。
+	// pending（总额）在输出时按 accrual + payable − claimed 现算，等于拆分前的口径。
+	accrual decimal.Decimal
+	payable decimal.Decimal
 	pending decimal.Decimal
 	claimed decimal.Decimal
 	// tombstone 标记该地址在「已移除流」的遗留欠款（ledger.Tombstones）里出现过。它只用于判定
@@ -169,6 +173,9 @@ type rewardStreamRecipientAgg struct {
 // 同时在活跃份额表与已移除流里出现的地址不算（当前仍有份额 ⇒ 不是遗留欠款收款人）。
 // zero_share = 该地址出现在**活跃**份额表里但份额为 0（链上存在「流还在、份额被置 0」的收款人），
 // 且没被 tombstone 命中 —— 这类行同样「份额 0% 却有待付」，前端要给它一句说明。
+//
+// 待付拆两列（2026-10-09 用户裁定）：pending_claim_current（当期＝本期应计−本期已提）与
+// pending_claim_carried（跨周期＝链上 Payable，即此前各期已结算未提取的结转）；两列之和恒等于 pending_claim。
 //
 // 输出顺序＝「服务受益方排行」顺序：按待付 pending_claim 降序，pending 相等时按地址升序（稳定）；
 // 不做截断，全部返回（前端按序取前 N）。
@@ -199,6 +206,8 @@ func buildRewardStreamRecipients(ledger *londobell.RewardStreamLedger, denom dec
 				e.zeroShare = true
 			}
 			current := mulDiv(st.Accrued, r.Share, denom)
+			e.accrual = e.accrual.Add(current)
+			e.payable = e.payable.Add(r.Payable)
 			e.pending = e.pending.Add(current).Add(r.Payable).Sub(r.ClaimedPeriod)
 			e.claimed = e.claimed.Add(r.ClaimedPeriod)
 		}
@@ -213,6 +222,7 @@ func buildRewardStreamRecipients(ledger *londobell.RewardStreamLedger, denom dec
 			}
 			e := get(r.Address)
 			e.pending = e.pending.Add(r.Payable)
+			e.payable = e.payable.Add(r.Payable)
 			e.tombstone = true
 		}
 	}
@@ -235,13 +245,25 @@ func buildRewardStreamRecipients(ledger *londobell.RewardStreamLedger, denom dec
 	out := make([]*filscan.RewardStreamRecipient, 0, len(addresses))
 	for _, addr := range addresses {
 		e := agg[addr]
+		// 当期应收 = 本期应计 − 本期已提（不小于 0）；跨周期应收 = 总额 − 当期应收。
+		// 拆分口径（显示约定）：本期提取先冲抵本期应计，超出部分再冲抵跨周期结转 —— 两列之和恒等于 pending_claim。
+		current := e.accrual.Sub(e.claimed)
+		if current.IsNegative() {
+			current = decimal.Zero
+		}
+		carried := e.pending.Sub(current)
+		if carried.IsNegative() {
+			carried = decimal.Zero
+		}
 		out = append(out, &filscan.RewardStreamRecipient{
-			Address:       chain.SmartAddress(addr).Address(),
-			SharePct:      sharePercent(e.share, denom),
-			PendingClaim:  e.pending,
-			ClaimedPeriod: e.claimed,
-			RemovedStream: e.tombstone && e.share.IsZero(),
-			ZeroShare:     e.zeroShare && !e.tombstone,
+			Address:             chain.SmartAddress(addr).Address(),
+			SharePct:            sharePercent(e.share, denom),
+			PendingClaim:        e.pending,
+			PendingClaimCurrent: current,
+			PendingClaimCarried: carried,
+			ClaimedPeriod:       e.claimed,
+			RemovedStream:       e.tombstone && e.share.IsZero(),
+			ZeroShare:           e.zeroShare && !e.tombstone,
 		})
 	}
 	return out

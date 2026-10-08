@@ -100,6 +100,8 @@ func TestRewardStreamLedgerCaliRealSnapshot(t *testing.T) {
 		addr    string
 		share   string
 		pending string
+		current string
+		carried string
 		claimed string
 		removed bool
 		zero    bool
@@ -108,9 +110,13 @@ func TestRewardStreamLedgerCaliRealSnapshot(t *testing.T) {
 		// 注意 t0199897 份额最大却排最后：其本期已提取 10,378.06 FIL（claimed_period），待付被扣减 ——
 		// 这正是新增「已付」列要暴露的信息（金额取链上实测的 recipient 级 ClaimedPeriod；accrued/payable 为构造自洽值，见上）。
 		// removed_stream：只有 t0200206 是「只出现在已移除流（tombstone）里、当前份额为 0」的遗留欠款收款人 ⇒ true。
-		{"t0200206", "0.00", "4062440000000000000000", "0", true, false}, // tombstone：无份额、无 claimed_period 字段（计 0），只剩未提
-		{"t0200442", "26.25", "3754277286135693216900", "0", false, false},
-		{"t0199897", "73.75", "167662713864306783100", "10378060000000000000000", false, false},
+		// 拆列口径：pending_claim_current = max(0, 本期应计 − 本期已提)；carried = 总额 − current。
+		// t0200206 是纯结转（tombstone 只有 payable）⇒ current=0、carried=全额；
+		// t0199897 本期应计 10,545.72 FIL、本期已提 10,378.06 FIL ⇒ current 只剩 167.66 FIL；
+		// t0200442 本期应计 3,754.28 FIL、未提取 ⇒ 全部落在当期列。
+		{"t0200206", "0.00", "4062440000000000000000", "0", "4062440000000000000000", "0", true, false},
+		{"t0200442", "26.25", "3754277286135693216900", "3754277286135693216900", "0", "0", false, false},
+		{"t0199897", "73.75", "167662713864306783100", "167662713864306783100", "0", "10378060000000000000000", false, false},
 	}
 	for i, w := range want {
 		got := resp.Recipients[i]
@@ -122,6 +128,17 @@ func TestRewardStreamLedgerCaliRealSnapshot(t *testing.T) {
 		}
 		if !got.ClaimedPeriod.Equal(decimal.RequireFromString(w.claimed)) {
 			t.Fatalf("recipients[%d] 已付 claimed_period 错: got %s want %s", i, got.ClaimedPeriod, w.claimed)
+		}
+		if !got.PendingClaimCurrent.Equal(decimal.RequireFromString(w.current)) {
+			t.Fatalf("recipients[%d] 当期应收错: got %s want %s", i, got.PendingClaimCurrent, w.current)
+		}
+		if !got.PendingClaimCarried.Equal(decimal.RequireFromString(w.carried)) {
+			t.Fatalf("recipients[%d] 跨周期应收错: got %s want %s", i, got.PendingClaimCarried, w.carried)
+		}
+		// 不变量：当期 + 跨周期 == 总额（显示约定，任何一行都不许破）
+		if !got.PendingClaimCurrent.Add(got.PendingClaimCarried).Equal(got.PendingClaim) {
+			t.Fatalf("recipients[%d] 拆列不守恒: current %s + carried %s != pending %s",
+				i, got.PendingClaimCurrent, got.PendingClaimCarried, got.PendingClaim)
 		}
 		if got.RemovedStream != w.removed {
 			t.Fatalf("recipients[%d] removed_stream 错: got %v want %v", i, got.RemovedStream, w.removed)
@@ -201,6 +218,13 @@ func TestRewardStreamLedgerZeroShareLiveStream(t *testing.T) {
 	}
 	if !first.PendingClaim.Equal(decimal.RequireFromString("7507775215796681617728")) {
 		t.Fatalf("t0200442 待付应等于 payable 7,507.78 FIL，得到 %s", first.PendingClaim)
+	}
+	// 份额 0 ⇒ 本期应计 0 ⇒ 当期应收 0；这 7,507.78 FIL 全部是跨周期结转（链上 payable）。
+	if !first.PendingClaimCurrent.IsZero() {
+		t.Fatalf("t0200442 当期应收应为 0（本期应计为 0），得到 %s", first.PendingClaimCurrent)
+	}
+	if !first.PendingClaimCarried.Equal(decimal.RequireFromString("7507775215796681617728")) {
+		t.Fatalf("t0200442 跨周期应收应等于 payable，得到 %s", first.PendingClaimCarried)
 	}
 	if second.Address != "t0200206" || second.SharePct != "0.00" || !second.RemovedStream || second.ZeroShare {
 		t.Fatalf("tombstone 行应为 t0200206 / 0.00%% / removed=true / zero=false，得到 %s/%s/removed=%v/zero=%v",
