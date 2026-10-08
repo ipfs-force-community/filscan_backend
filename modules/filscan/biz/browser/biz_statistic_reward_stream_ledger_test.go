@@ -101,13 +101,15 @@ func TestRewardStreamLedgerCaliRealSnapshot(t *testing.T) {
 		share   string
 		pending string
 		claimed string
+		removed bool
 	}{
 		// 排行顺序＝待付降序：t0200206(4062.44) > t0200442(3754.28) > t0199897(167.66)。
 		// 注意 t0199897 份额最大却排最后：其本期已提取 10,378.06 FIL（claimed_period），待付被扣减 ——
 		// 这正是新增「已付」列要暴露的信息（金额取链上实测的 recipient 级 ClaimedPeriod；accrued/payable 为构造自洽值，见上）。
-		{"t0200206", "0.00", "4062440000000000000000", "0"}, // tombstone：无份额、无 claimed_period 字段（计 0），只剩未提
-		{"t0200442", "26.25", "3754277286135693216900", "0"},
-		{"t0199897", "73.75", "167662713864306783100", "10378060000000000000000"},
+		// removed_stream：只有 t0200206 是「只出现在已移除流（tombstone）里、当前份额为 0」的遗留欠款收款人 ⇒ true。
+		{"t0200206", "0.00", "4062440000000000000000", "0", true}, // tombstone：无份额、无 claimed_period 字段（计 0），只剩未提
+		{"t0200442", "26.25", "3754277286135693216900", "0", false},
+		{"t0199897", "73.75", "167662713864306783100", "10378060000000000000000", false},
 	}
 	for i, w := range want {
 		got := resp.Recipients[i]
@@ -119,6 +121,9 @@ func TestRewardStreamLedgerCaliRealSnapshot(t *testing.T) {
 		}
 		if !got.ClaimedPeriod.Equal(decimal.RequireFromString(w.claimed)) {
 			t.Fatalf("recipients[%d] 已付 claimed_period 错: got %s want %s", i, got.ClaimedPeriod, w.claimed)
+		}
+		if got.RemovedStream != w.removed {
+			t.Fatalf("recipients[%d] removed_stream 错: got %v want %v", i, got.RemovedStream, w.removed)
 		}
 	}
 	// 至少一条 recipient 的已付非零，确保「已付」列真的被测到（不是全 0 的空断言）。

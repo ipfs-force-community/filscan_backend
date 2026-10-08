@@ -151,6 +151,9 @@ type rewardStreamRecipientAgg struct {
 	share   decimal.Decimal
 	pending decimal.Decimal
 	claimed decimal.Decimal
+	// tombstone 标记该地址在「已移除流」的遗留欠款（ledger.Tombstones）里出现过。它只用于判定
+	// removed_stream：只有「只出现在已移除流里（当前份额为 0）」才算是遗留欠款收款人。
+	tombstone bool
 }
 
 // buildRewardStreamRecipients 汇总各受益地址的份额%、待付与本期已提。
@@ -158,6 +161,9 @@ type rewardStreamRecipientAgg struct {
 // 按地址合并（同一地址出现在多条流时份额、待付、已提相加）。待付口径与 actor 一致：
 //   - 显式流行 = 当前期应得(accrued × share / denom) − 当期已提(claimed_period) + 结转未提(payable)；
 //   - tombstone 行 = 结转未提(payable)（被移除的流已无份额，share_pct 记 0.00，且无 claimed_period 字段、已提取 0）。
+//
+// removed_stream = 该地址只出现在已移除流（tombstone）里且当前份额为 0（tombstone && share.IsZero()）：
+// 同时在活跃份额表与已移除流里出现的地址不算（当前仍有份额 ⇒ 不是遗留欠款收款人）。
 //
 // 输出顺序＝「服务受益方排行」顺序：按待付 pending_claim 降序，pending 相等时按地址升序（稳定）；
 // 不做截断，全部返回（前端按序取前 N）。
@@ -197,6 +203,7 @@ func buildRewardStreamRecipients(ledger *londobell.RewardStreamLedger, denom dec
 			}
 			e := get(r.Address)
 			e.pending = e.pending.Add(r.Payable)
+			e.tombstone = true
 		}
 	}
 
@@ -223,6 +230,7 @@ func buildRewardStreamRecipients(ledger *londobell.RewardStreamLedger, denom dec
 			SharePct:      sharePercent(e.share, denom),
 			PendingClaim:  e.pending,
 			ClaimedPeriod: e.claimed,
+			RemovedStream: e.tombstone && e.share.IsZero(),
 		})
 	}
 	return out
