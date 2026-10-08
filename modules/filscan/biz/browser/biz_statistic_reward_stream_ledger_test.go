@@ -15,8 +15,8 @@ import (
 
 // caliLedgerJSON 是 2026-10-08 Calibnet 实测的 f02 服务流账本形态（impact/README §0）：
 //   - 隐式流（共识）评估权重 50%；显式流（服务流）评估权重 45% ⇒ 日程级销毁 = 100−50−45 = 5%；
-//   - 份额表 100%：f014260492 73.7463% / f016424204 26.2537%（Writer f011836172）；
-//   - 当期 f014260492 已 Claim 10,378.06 FIL；被移除的 stream 3 仍欠 f09346060 4,062.44 FIL（tombstone）。
+//   - 份额表 100%：f0199897 73.7463% / f0200442 26.2537%（Writer f0200116）；
+//   - 当期 f0199897 已 Claim 10,378.06 FIL；被移除的 stream 3 仍欠 f0200206 4,062.44 FIL（tombstone）。
 //
 // 说明：accrued / payable 未逐笔公布，取构造的自洽值（accrued = 14,300 FIL），使各受益方待付非负
 // 且 Σ(accrued×share/denom) 恰等于 accrued（14,300 × 1e18 = 1.43e22）；账本端点联调后应替换为真实读数。
@@ -29,12 +29,12 @@ const caliLedgerJSON = `{
     {"id":1,"implicit":true,"evaluated_weight":"500000000000000000","accrued":"0","claimed_period":"0","payable":"0"},
     {"id":2,"implicit":false,"evaluated_weight":"450000000000000000","accrued":"14300000000000000000000","claimed_period":"10378060000000000000000","payable":"0",
      "recipients":[
-       {"address":"t014260492","share":"737463126843657817","payable":"0","claimed_period":"10378060000000000000000"},
-       {"address":"t016424204","share":"262536873156342183","payable":"0","claimed_period":"0"}
+       {"address":"t0199897","share":"737463126843657817","payable":"0","claimed_period":"10378060000000000000000"},
+       {"address":"t0200442","share":"262536873156342183","payable":"0","claimed_period":"0"}
      ]}
   ],
   "tombstones":[
-    {"id":3,"recipients":[{"address":"t09346060","payable":"4062440000000000000000"}]}
+    {"id":3,"recipients":[{"address":"t0200206","payable":"4062440000000000000000"}]}
   ],
   "liability": "7984380000000000000000"
 }`
@@ -100,9 +100,11 @@ func TestRewardStreamLedgerCaliRealSnapshot(t *testing.T) {
 		share   string
 		pending string
 	}{
-		{"t014260492", "73.75", "167662713864306783100"},
-		{"t016424204", "26.25", "3754277286135693216900"},
-		{"t09346060", "0.00", "4062440000000000000000"}, // tombstone：无份额、只剩未提
+		// 按地址升序（实现按地址字符串升序合并 live + tombstone）：
+		// t0199897 < t0200206 < t0200442 —— 修正真实地址后，tombstone 收款人 t0200206 排在两个 live 受益方之间。
+		{"t0199897", "73.75", "167662713864306783100"},
+		{"t0200206", "0.00", "4062440000000000000000"}, // tombstone：无份额、只剩未提
+		{"t0200442", "26.25", "3754277286135693216900"},
 	}
 	for i, w := range want {
 		got := resp.Recipients[i]

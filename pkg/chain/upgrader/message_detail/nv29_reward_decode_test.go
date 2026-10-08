@@ -18,14 +18,14 @@ import (
 //
 // 参数/返回用 go-state-types v0.19.0 builtin/v19/reward 的**真实类型经 MarshalCBOR 生成的字节**
 // （与链上 params 同一编码器，非手搓），地址/流 ID/金额取 2026-10-08 Calibnet 实测值
-// （impact/README §0）：隐式流 ID=1、服务流 ID=2、份额表 f014260492 73.7463% / f016424204 26.2537%、
-// Writer f011836172、TStart 4135054、当期 f014260492 已 Claim 10,378.06 FIL。
+// （impact/README §0）：隐式流 ID=1、服务流 ID=2、份额表 f0199897 73.7463% / f0200442 26.2537%、
+// Writer f0200116、TStart 4135054、当期 f0199897 已 Claim 10,378.06 FIL。
 
 const (
 	caliServiceStreamID = 2
 	caliServiceWeight   = 450000000000000000        // 45% (Denom=1e18)
-	caliShareA          = 737463126843657817        // f014260492 73.7463%
-	caliShareB          = 262536873156342183        // f016424204 26.2537%
+	caliShareA          = 737463126843657817        // f0199897 73.7463%
+	caliShareB          = 262536873156342183        // f0200442 26.2537%
 	caliClaimAtto       = "10378060000000000000000" // 10,378.06 FIL
 )
 
@@ -65,7 +65,7 @@ func cborParams(t *testing.T, m interface{ MarshalCBOR(w io.Writer) error }) map
 func TestDecodeClaimExportedParams(t *testing.T) {
 	params := &reward19.ClaimParams{
 		ID:      reward19.StreamID(caliServiceStreamID),
-		Wallets: []address.Address{mustAddr(t, "f014260492")},
+		Wallets: []address.Address{mustAddr(t, "f0199897")},
 	}
 
 	res, err := DecodeParamsFromVersion(chain.Epoch(UpgradeSolsticeHeight.Int64()), cborParams(t, params), "ClaimExported")
@@ -79,8 +79,8 @@ func TestDecodeClaimExportedParams(t *testing.T) {
 	if got.ID != caliServiceStreamID {
 		t.Fatalf("流 ID 错: got %d want %d", got.ID, caliServiceStreamID)
 	}
-	if len(got.Wallets) != 1 || got.Wallets[0] != "f014260492" {
-		t.Fatalf("钱包列表错: got %v want [f014260492]", got.Wallets)
+	if len(got.Wallets) != 1 || got.Wallets[0] != "f0199897" {
+		t.Fatalf("钱包列表错: got %v want [f0199897]", got.Wallets)
 	}
 }
 
@@ -115,10 +115,10 @@ func TestDecodeRegisterStreamExportedParams(t *testing.T) {
 			Cap:    caliServiceWeight,
 		},
 		Distribution: &reward19.DistributionInit{
-			Writer: mustAddr(t, "f011836172"),
+			Writer: mustAddr(t, "f0200116"),
 			Shares: []reward19.RecipientShare{
-				{Recipient: mustAddr(t, "f014260492"), Share: caliShareA},
-				{Recipient: mustAddr(t, "f016424204"), Share: caliShareB},
+				{Recipient: mustAddr(t, "f0199897"), Share: caliShareA},
+				{Recipient: mustAddr(t, "f0200442"), Share: caliShareB},
 			},
 		},
 		ActivationEpoch: abi.ChainEpoch(4135054),
@@ -138,12 +138,12 @@ func TestDecodeRegisterStreamExportedParams(t *testing.T) {
 	if got.Weight.VStart != caliServiceWeight || got.Weight.Floor != caliServiceWeight || got.Weight.Cap != caliServiceWeight {
 		t.Fatalf("权重记录错: %+v", got.Weight)
 	}
-	if got.Distribution == nil || got.Distribution.Writer != "f011836172" {
+	if got.Distribution == nil || got.Distribution.Writer != "f0200116" {
 		t.Fatalf("分配 Writer 错: %+v", got.Distribution)
 	}
 	if len(got.Distribution.Shares) != 2 ||
-		got.Distribution.Shares[0].Recipient != "f014260492" || got.Distribution.Shares[0].Share != caliShareA ||
-		got.Distribution.Shares[1].Recipient != "f016424204" || got.Distribution.Shares[1].Share != caliShareB {
+		got.Distribution.Shares[0].Recipient != "f0199897" || got.Distribution.Shares[0].Share != caliShareA ||
+		got.Distribution.Shares[1].Recipient != "f0200442" || got.Distribution.Shares[1].Share != caliShareB {
 		t.Fatalf("份额表错: %+v", got.Distribution.Shares)
 	}
 }
@@ -153,7 +153,7 @@ func TestDecodeSetSharesAndCancelPendingParams(t *testing.T) {
 	shares := &reward19.SetSharesParams{
 		ID: reward19.StreamID(caliServiceStreamID),
 		Shares: []reward19.RecipientShare{
-			{Recipient: mustAddr(t, "f014260492"), Share: caliShareA},
+			{Recipient: mustAddr(t, "f0199897"), Share: caliShareA},
 		},
 	}
 	res, err := DecodeParamsFromVersion(chain.Epoch(UpgradeSolsticeHeight.Int64()), cborParams(t, shares), "SetSharesExported")
