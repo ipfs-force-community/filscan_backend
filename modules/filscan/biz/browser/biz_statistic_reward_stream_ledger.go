@@ -154,6 +154,9 @@ type rewardStreamRecipientAgg struct {
 	// tombstone 标记该地址在「已移除流」的遗留欠款（ledger.Tombstones）里出现过。它只用于判定
 	// removed_stream：只有「只出现在已移除流里（当前份额为 0）」才算是遗留欠款收款人。
 	tombstone bool
+	// zeroShare 标记该地址在**活跃**流里出现过但份额为 0（链上存在「流还在、份额已被置 0」的收款人：
+	// 2026-10-09 cali 实测 t0200442）。判定 zero_share 用，与 tombstone 互斥（tombstone 优先）。
+	zeroShare bool
 }
 
 // buildRewardStreamRecipients 汇总各受益地址的份额%、待付与本期已提。
@@ -164,6 +167,8 @@ type rewardStreamRecipientAgg struct {
 //
 // removed_stream = 该地址只出现在已移除流（tombstone）里且当前份额为 0（tombstone && share.IsZero()）：
 // 同时在活跃份额表与已移除流里出现的地址不算（当前仍有份额 ⇒ 不是遗留欠款收款人）。
+// zero_share = 该地址出现在**活跃**份额表里但份额为 0（链上存在「流还在、份额被置 0」的收款人），
+// 且没被 tombstone 命中 —— 这类行同样「份额 0% 却有待付」，前端要给它一句说明。
 //
 // 输出顺序＝「服务受益方排行」顺序：按待付 pending_claim 降序，pending 相等时按地址升序（稳定）；
 // 不做截断，全部返回（前端按序取前 N）。
@@ -188,6 +193,11 @@ func buildRewardStreamRecipients(ledger *londobell.RewardStreamLedger, denom dec
 			}
 			e := get(r.Address)
 			e.share = e.share.Add(r.Share)
+			if r.Share.IsZero() {
+				// 活跃流里份额为 0：不是「已移除流的遗留欠款」，而是「流还在、这一轮没分到权重」，
+				// 前端要另给一句说明（否则和「份额 0% 却有钱」一起看会以为漏标）。
+				e.zeroShare = true
+			}
 			current := mulDiv(st.Accrued, r.Share, denom)
 			e.pending = e.pending.Add(current).Add(r.Payable).Sub(r.ClaimedPeriod)
 			e.claimed = e.claimed.Add(r.ClaimedPeriod)
@@ -231,6 +241,7 @@ func buildRewardStreamRecipients(ledger *londobell.RewardStreamLedger, denom dec
 			PendingClaim:  e.pending,
 			ClaimedPeriod: e.claimed,
 			RemovedStream: e.tombstone && e.share.IsZero(),
+			ZeroShare:     e.zeroShare && !e.tombstone,
 		})
 	}
 	return out

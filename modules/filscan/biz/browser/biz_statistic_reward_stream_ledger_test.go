@@ -102,14 +102,15 @@ func TestRewardStreamLedgerCaliRealSnapshot(t *testing.T) {
 		pending string
 		claimed string
 		removed bool
+		zero    bool
 	}{
 		// 排行顺序＝待付降序：t0200206(4062.44) > t0200442(3754.28) > t0199897(167.66)。
 		// 注意 t0199897 份额最大却排最后：其本期已提取 10,378.06 FIL（claimed_period），待付被扣减 ——
 		// 这正是新增「已付」列要暴露的信息（金额取链上实测的 recipient 级 ClaimedPeriod；accrued/payable 为构造自洽值，见上）。
 		// removed_stream：只有 t0200206 是「只出现在已移除流（tombstone）里、当前份额为 0」的遗留欠款收款人 ⇒ true。
-		{"t0200206", "0.00", "4062440000000000000000", "0", true}, // tombstone：无份额、无 claimed_period 字段（计 0），只剩未提
-		{"t0200442", "26.25", "3754277286135693216900", "0", false},
-		{"t0199897", "73.75", "167662713864306783100", "10378060000000000000000", false},
+		{"t0200206", "0.00", "4062440000000000000000", "0", true, false}, // tombstone：无份额、无 claimed_period 字段（计 0），只剩未提
+		{"t0200442", "26.25", "3754277286135693216900", "0", false, false},
+		{"t0199897", "73.75", "167662713864306783100", "10378060000000000000000", false, false},
 	}
 	for i, w := range want {
 		got := resp.Recipients[i]
@@ -124,6 +125,9 @@ func TestRewardStreamLedgerCaliRealSnapshot(t *testing.T) {
 		}
 		if got.RemovedStream != w.removed {
 			t.Fatalf("recipients[%d] removed_stream 错: got %v want %v", i, got.RemovedStream, w.removed)
+		}
+		if got.ZeroShare != w.zero {
+			t.Fatalf("recipients[%d] zero_share 错: got %v want %v", i, got.ZeroShare, w.zero)
 		}
 	}
 	// 至少一条 recipient 的已付非零，确保「已付」列真的被测到（不是全 0 的空断言）。
@@ -143,6 +147,68 @@ func TestRewardStreamLedgerCaliRealSnapshot(t *testing.T) {
 	}
 	if src.epoch == nil || src.epoch.Int64() != 4110339 {
 		t.Fatalf("取数应带当前链头 epoch，得到 %v", src.epoch)
+	}
+}
+
+// caliZeroShareLedgerJSON 是 2026-10-09 Calibnet 实测的 f02 账本（epoch 4139065）：
+//   - 活跃流只剩 2 条：隐式（矿工）50% + 显式服务流 45%，后者的**唯一受益方 t0200442 份额就是 0**
+//     （链上确实存在「流还在、份额被置 0」的收款人：epoch 4138800 起 share 由 26.25% 变 0，应得转成 payable）；
+//   - tombstone 里只剩 t0200206 的 4,062.44 FIL；
+//   - liability 11,570.215563980994166781 = 两行欠款之和（逐位相等）。
+//
+// 这条样本用来锁 zero_share：份额 0% 但**不**是「已移除流」的行也必须被标记，否则页面上同为 0% 的两行一个带说明一个不带。
+const caliZeroShareLedgerJSON = `{
+  "epoch": 4139065,
+  "nv29": true,
+  "denom": "1000000000000000000",
+  "streams": [
+    {"id":1,"implicit":true,"evaluated_weight":"500000000000000000","accrued":"0","claimed_period":"0","payable":"0"},
+    {"id":2,"implicit":false,"evaluated_weight":"450000000000000000","accrued":"0","claimed_period":"0","payable":"7507775215796681617728",
+     "recipients":[{"address":"t0200442","share":"0","payable":"7507775215796681617728","claimed_period":"0"}]}
+  ],
+  "tombstones":[{"id":3,"recipients":[{"address":"t0200206","payable":"4062440348184312549053"}]}],
+  "liability":"11570215563980994166781"
+}`
+
+// 活跃流里份额为 0 的收款人：zero_share=true、removed_stream=false（与 tombstone 行区分）；
+// 两行都是 0.00% 但来源不同，前端据此各给一句说明。
+func TestRewardStreamLedgerZeroShareLiveStream(t *testing.T) {
+	src := &fakeRewardStreamLedgerSource{ledger: mustLedger(t, caliZeroShareLedgerJSON)}
+	biz := NewStatisticRewardStreamLedgerBiz(&fakeRewardStreamsSyncer{epoch: 4139065}, src)
+
+	resp, err := biz.RewardStreamLedger(context.Background(), filscan.RewardStreamLedgerRequest{})
+	if err != nil {
+		t.Fatalf("不应报错: %s", err)
+	}
+	if !resp.Nv29 {
+		t.Fatal("NV29 已激活，nv29 应为 true")
+	}
+	if resp.CurrentSplit.Miner != "50.0" || resp.CurrentSplit.Service != "45.0" || resp.CurrentSplit.Burn != "5.0" {
+		t.Fatalf("current_split 错: got %+v", resp.CurrentSplit)
+	}
+	// 代付总额必须等于 actor 自己的 liability（逐位相等）。
+	if !resp.PendingClaim.Equal(decimal.RequireFromString("11570215563980994166781")) {
+		t.Fatalf("pending_claim 应等于 liability，得到 %s", resp.PendingClaim)
+	}
+	if len(resp.Recipients) != 2 {
+		t.Fatalf("应返回 2 个受益方，得到 %d", len(resp.Recipients))
+	}
+	first, second := resp.Recipients[0], resp.Recipients[1]
+	// 排序＝待付降序：t0200442(7507.78) > t0200206(4062.44)
+	if first.Address != "t0200442" || first.SharePct != "0.00" || first.RemovedStream || !first.ZeroShare {
+		t.Fatalf("活跃流份额 0 的行应为 t0200442 / 0.00%% / removed=false / zero=true，得到 %s/%s/removed=%v/zero=%v",
+			first.Address, first.SharePct, first.RemovedStream, first.ZeroShare)
+	}
+	if !first.PendingClaim.Equal(decimal.RequireFromString("7507775215796681617728")) {
+		t.Fatalf("t0200442 待付应等于 payable 7,507.78 FIL，得到 %s", first.PendingClaim)
+	}
+	if second.Address != "t0200206" || second.SharePct != "0.00" || !second.RemovedStream || second.ZeroShare {
+		t.Fatalf("tombstone 行应为 t0200206 / 0.00%% / removed=true / zero=false，得到 %s/%s/removed=%v/zero=%v",
+			second.Address, second.SharePct, second.RemovedStream, second.ZeroShare)
+	}
+	// 两行都是 0.00%，但必须恰好一行 removed、一行 zero（否则页面上又会出现「一个有一个没有」）。
+	if first.ZeroShare == second.ZeroShare {
+		t.Fatal("两行应一个 removed_stream 一个 zero_share，出现「同为 0% 却标记不一致」")
 	}
 }
 

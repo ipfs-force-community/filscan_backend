@@ -363,6 +363,10 @@ type RewardStreamRecipient struct {
 	PendingClaim  decimal.Decimal `json:"pending_claim"`  // 待付金额（attoFIL）
 	ClaimedPeriod decimal.Decimal `json:"claimed_period"` // 该地址本期已提取金额（attoFIL 十进制字符串）
 	RemovedStream bool            `json:"removed_stream"` // 只出现在已移除流的遗留欠款里且当前份额为 0 ⇒ 遗留欠款收款人（true）
+	// ZeroShare：该地址仍在**当前活跃的**服务流份额表里，但份额就是 0（该流本轮没给它分配权重）——
+	// 与 RemovedStream 互斥（tombstone 命中优先）。true ⇒ 它没有新的应得，金额同样是此前结转、仍可提取的欠款。
+	// 用例（2026-10-09 cali 实测）：地址移除 ≠ 流被删，链上可能留下「流还在、份额 0」的收款人。
+	ZeroShare bool `json:"zero_share"`
 }
 
 // ClaimedPeriod 口径说明：来源是链上 f02 奖励流账本的 recipient 级 ClaimedPeriod（**当前期**口径，非累计）；
