@@ -488,11 +488,15 @@ func (s *Syncer) run() {
 		if err != nil {
 			switch err.(type) {
 			case *mix.Warn:
-				s.log.Warnf("高度 [%s,%s] 执行失败: %s, 等待: %s 重试", s.epoch, finalHeight, err, s.errorWaitDuration)
+				// 软失败（如 StateFinalHeight / FinalHeight 未到）：在 data_error.go 里被归为
+				// ErrorKindNotReady ——「保持原有重试语义，不计入跳过」（跳过才会真丢数据），
+				// 即设计上的正常节流（等状态链路追上，15s 后重跑同一区间）。
+				// 真出问题由「同步器游标停滞 / 表新鲜度」类监控报警，故这里降到 Debug 免得刷屏。
+				s.log.Debugf("高度 [%s,%s] 执行失败: %s, 等待: %s 重试", s.epoch, finalHeight, err, s.errorWaitDuration)
 			default:
 				if strings.Contains(err.Error(), "未获取到 miner 数据") ||
 					strings.Contains(err.Error(), "未到") {
-					s.log.Warnf("高度 [%s,%s] 执行失败: %s, 等待: %s 重试", s.epoch, finalHeight, err, s.errorWaitDuration)
+					s.log.Debugf("高度 [%s,%s] 执行失败: %s, 等待: %s 重试", s.epoch, finalHeight, err, s.errorWaitDuration)
 				} else {
 					s.log.Errorf("高度 [%s,%s] 执行错误: %s, 等待: %s 重试", s.epoch, finalHeight, err, s.errorWaitDuration) //多个并行时，单个出错 退出加报错，需要看看
 				}
@@ -975,7 +979,9 @@ func (s *Syncer) execGroups(epoch chain.Epoch, total int64, left *atomic.Int64, 
 		if err != nil {
 			switch err.(type) {
 			case *mix.Warn:
-				s.log.Warnf("epoch: %s 执行 ContextBuilder 失败: %s", epoch, err)
+				// 同上：*mix.Warn 是「还没轮到该高度」的软闸门（ErrorKindNotReady，永不跳过），
+				// 属正常现象，降 Debug 避免每 15s 一轮刷屏；真停滞由游标/新鲜度类监控发现。
+				s.log.Debugf("epoch: %s 执行 ContextBuilder 失败: %s", epoch, err)
 			default:
 				s.log.Errorf("epoch: %s 执行 ContextBuilder 错误: %s", epoch, err)
 			}
