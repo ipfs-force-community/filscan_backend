@@ -28,6 +28,11 @@
 --   claimed_in_period : 该周期内链上 claimed_period 的**最大观测值**（attoFIL）。
 --     链上周期内 claimed_period 单调不减，故「周期内最大值」即「该周期最终已提」。
 --     合并写取 GREATEST 正是为了让重复观测/重跑不把大值降回小值。
+--   last_share        : 该周期内**最近一次**观测到的份额之和（Denom=1e18 定点）。
+--     供展示层给「本周期离场者」补 last_share_pct（离场后链上已查不到该地址的当前份额，
+--     只有归集表还留着它最后一次的份额）。注意它是「按地址跨显式流累加的份额之和」，
+--     与快照表 share 同口径（分母同为 Denom，折算用同一 sharePercent）。
+--     合并写只在观测高度**更新**时替换（见下），不无脑覆盖。
 --   period_start_epoch: 周期标识（周期起点高度），不是「本行最后一个高度」。
 --   first_epoch / last_epoch: 本周期内首次 / 最近一次观测到该受益方的高度（诊断与回滚边界用）。
 --
@@ -36,6 +41,11 @@
 --   claimed_in_period = GREATEST(已存, excluded)
 --   first_epoch       = LEAST(已存, excluded)
 --   last_epoch        = GREATEST(已存, excluded)
+--   last_share        = 取「观测高度更大」的那一行的值：
+--                       CASE WHEN excluded.last_epoch >= 已存.last_epoch THEN excluded.last_share
+--                            ELSE 已存.last_share END
+--                       （同高度重跑 excluded.last_epoch == 已存.last_epoch ⇒ 取新值，同日同值；
+--                        新观测更旧 ⇒ 保留已存值，绝不用陈旧份额盖掉更新的）
 -- 同一高度重跑（重试、回放）、同一周期跨高度重复观测后，表内容与只跑一次完全相同，
 -- 且**绝不会把已记录的较大 claimed_in_period 覆盖成较小值**（这是与快照表覆盖式 upsert 的关键差异）。
 --
@@ -62,9 +72,15 @@ create table if not exists chain.reward_stream_recipient_period
     address            text           not null,               -- 受益方地址（robust 原文，如 f... / t...）
     period_start_epoch bigint         not null,               -- 周期起点高度（周期标识）
     claimed_in_period  numeric(38, 0) not null default 0,     -- 本周期已提（attoFIL）= 该周期内 claimed_period 最大观测值
+    last_share         numeric(38, 0) not null default 0,     -- 该周期内最近一次观测到的份额之和（Denom=1e18 定点）
     first_epoch        bigint         not null,               -- 本周期内首次观测到该受益方的高度
     last_epoch         bigint         not null                -- 本周期内最近一次观测到该受益方的高度（回滚边界列）
 );
+
+-- last_share 为后补列：本表尚未上生产时是就地改（上面 create 已带该列）；为兼容「已跑过旧版 38 的库」，
+-- 这里再补一条幂等 alter（already-exists 时无操作）。全新库由 create 建列，这里同样无操作。
+alter table chain.reward_stream_recipient_period
+    add column if not exists last_share numeric(38, 0) not null default 0;
 
 -- 唯一键：幂等合并写的落点，也是「某地址的全部周期行」的读路径（前导列 address）。
 create unique index if not exists reward_stream_recipient_period_address_period_uindex
@@ -80,6 +96,8 @@ comment on column chain.reward_stream_recipient_period.period_start_epoch is
     '周期起点高度 = nv29Epoch + ((epoch-nv29Epoch)/periodLen)*periodLen；周期标识，非本行最后高度';
 comment on column chain.reward_stream_recipient_period.claimed_in_period is
     '本周期已提（attoFIL）= 该周期内链上 claimed_period 的最大观测值；合并写取 GREATEST 防止重跑把大值降回小值';
+comment on column chain.reward_stream_recipient_period.last_share is
+    '该周期内最近一次观测到的份额之和（Denom=1e18 定点）；合并写按 last_epoch 取更新的那一行的值；供展示层给本周期离场者补 last_share_pct';
 comment on column chain.reward_stream_recipient_period.first_epoch is
     '本周期内首次观测到该受益方的高度；合并写取 LEAST';
 comment on column chain.reward_stream_recipient_period.last_epoch is

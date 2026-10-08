@@ -41,18 +41,53 @@ const caliLedgerJSON = `{
   "liability": "7984380000000000000000"
 }`
 
-// fakeRewardStreamRecipientSnapshot 假「本周期受益方快照」仓储（窄接口），记录调用次数与查询区间供降级/未激活断言。
+// fakeRewardStreamRecipientSnapshot 假「本周期受益方来源」仓储（快照 + 归集两路），
+// 记录调用次数与查询区间供降级/未激活/累计已收 断言。
 type fakeRewardStreamRecipientSnapshot struct {
+	// 快照来源（按高度）。
 	rows  []*po.RewardStreamRecipientEpoch
 	err   error
 	calls int
 	rng   chain.LCRCRange
+
+	// 归集来源（按周期）：本周期行（离场判定 + 累计探针）。
+	periodRows  []*po.RewardStreamRecipientPeriod
+	periodErr   error
+	periodCalls int
+	periodStart chain.Epoch
+	// 归集来源：按地址批量取（累计 SUM）。
+	periodByAddrRows  []*po.RewardStreamRecipientPeriod
+	periodByAddrErr   error
+	periodByAddrCalls int
+	periodByAddrAddrs []string
+	// 归集来源：全表 MIN(first_epoch)。
+	earliest      chain.Epoch
+	earliestFound bool
+	earliestErr   error
+	earliestCalls int
 }
 
 func (f *fakeRewardStreamRecipientSnapshot) ListRewardStreamRecipientsByEpochRange(_ context.Context, epochs chain.LCRCRange) ([]*po.RewardStreamRecipientEpoch, error) {
 	f.calls++
 	f.rng = epochs
 	return f.rows, f.err
+}
+
+func (f *fakeRewardStreamRecipientSnapshot) ListRewardStreamRecipientPeriodsByPeriodStart(_ context.Context, periodStart chain.Epoch) ([]*po.RewardStreamRecipientPeriod, error) {
+	f.periodCalls++
+	f.periodStart = periodStart
+	return f.periodRows, f.periodErr
+}
+
+func (f *fakeRewardStreamRecipientSnapshot) ListRewardStreamRecipientPeriodsByAddresses(_ context.Context, addresses []string) ([]*po.RewardStreamRecipientPeriod, error) {
+	f.periodByAddrCalls++
+	f.periodByAddrAddrs = addresses
+	return f.periodByAddrRows, f.periodByAddrErr
+}
+
+func (f *fakeRewardStreamRecipientSnapshot) EarliestRewardStreamRecipientPeriodEpoch(_ context.Context) (chain.Epoch, bool, error) {
+	f.earliestCalls++
+	return f.earliest, f.earliestFound, f.earliestErr
 }
 
 func mustLedger(t *testing.T, raw string) *londobell.RewardStreamLedger {
@@ -512,5 +547,297 @@ func TestRewardStreamLedgerDepartedOrderByCarriedDesc(t *testing.T) {
 	want := []string{"t0300201", "t0300200", "t0300202"}
 	if strings.Join(got, ",") != strings.Join(want, ",") {
 		t.Fatalf("离场行顺序应 %v，得到 %v", want, got)
+	}
+}
+
+// ===== 累计已收（claimed_total / claimed_since_epoch）与「本期离场」改以归集表为准 =====
+//
+// 归集表 chain.reward_stream_recipient_period 只增不减、跨周期保留，是「累计已收」与「本周期离场」的可靠来源；
+// 快照表可能被框架 HistoryClear 修剪，仅作 last_share 补充。以下用例覆盖六条硬要求。
+
+// periodRow 构造一条归集行（Denom=1e18 定点；金额为 attoFIL 十进制字符串）。
+func periodRow(addr string, periodStart, firstEpoch, lastEpoch int64, claimedAtto, lastShareAtto string) *po.RewardStreamRecipientPeriod {
+	return &po.RewardStreamRecipientPeriod{
+		Address:          addr,
+		PeriodStartEpoch: periodStart,
+		ClaimedInPeriod:  decimal.RequireFromString(claimedAtto),
+		LastShare:        decimal.RequireFromString(lastShareAtto),
+		FirstEpoch:       firstEpoch,
+		LastEpoch:        lastEpoch,
+	}
+}
+
+// ① claimed_total 为**多周期 SUM**（含离场行）且精度/不变量对得上；claimed_since_epoch = MIN(first_epoch)。
+func TestRewardStreamLedgerClaimedTotalSumAcrossPeriods(t *testing.T) {
+	const solstice = int64(6_000_000)
+	periodLen := int64(buildconstants.SolsticeEpochsPerQuarter)
+	cur := solstice + 2*periodLen + 5
+	start := solstice + 2*periodLen
+	prev := start - periodLen
+
+	snap := &fakeRewardStreamRecipientSnapshot{
+		// 本周期行：活跃地址 t0199897 + 已离场地址 t0300111（后者不在当前链上状态里）。
+		periodRows: []*po.RewardStreamRecipientPeriod{
+			periodRow("t0199897", start, cur-10, cur-1, "50000000000000000000", "1000000000000000000"),
+			periodRow("t0300111", start, cur-9, cur-2, "70000000000000000000", "300000000000000000"),
+		},
+		// 按地址批量取：含**历史周期**行，验证是跨周期 SUM（不是只看当期）。
+		periodByAddrRows: []*po.RewardStreamRecipientPeriod{
+			periodRow("t0199897", prev, prev+1, prev+9, "100000000000000000000", "1000000000000000000"),
+			periodRow("t0199897", start, cur-10, cur-1, "50000000000000000000", "1000000000000000000"),
+			periodRow("t0300111", prev, prev+2, prev+8, "70000000000000000000", "300000000000000000"),
+		},
+		earliest: chain.Epoch(prev + 1), earliestFound: true,
+	}
+	biz := NewStatisticRewardStreamLedgerBiz(&fakeRewardStreamsSyncer{epoch: cur}, &fakeRewardStreamLedgerSource{ledger: departedActiveLedger(cur)}, snap)
+	biz.solsticeEpoch = solstice
+
+	resp, err := biz.RewardStreamLedger(context.Background(), filscan.RewardStreamLedgerRequest{})
+	if err != nil {
+		t.Fatalf("不应报错: %s", err)
+	}
+	if len(resp.Recipients) != 2 {
+		t.Fatalf("应返回 2 行（1 活跃 + 1 离场），得到 %d", len(resp.Recipients))
+	}
+	// 活跃行：t0199897，累计 = 100e18 + 50e18 = 150e18（跨两个周期求和，含当期）。
+	active := resp.Recipients[0]
+	if active.Address != "t0199897" || active.Departed {
+		t.Fatalf("第 1 行应为活跃 t0199897，得到 %s/departed=%v", active.Address, active.Departed)
+	}
+	wantActive := decimal.RequireFromString("150000000000000000000")
+	if active.ClaimedTotal == nil || !active.ClaimedTotal.Equal(wantActive) {
+		t.Fatalf("活跃行 claimed_total 应为 150e18（跨周期 SUM），得到 %v", active.ClaimedTotal)
+	}
+	// 不变量/精度：SUM 逐位等于两周期之和（decimal 精确，不经 float）。
+	if !active.ClaimedTotal.Equal(decimal.RequireFromString("100000000000000000000").Add(decimal.RequireFromString("50000000000000000000"))) {
+		t.Fatalf("活跃行 claimed_total 精度不符: %s", active.ClaimedTotal)
+	}
+	// 离场行：t0300111，累计 = 70e18（**含离场行**）。
+	departed := resp.Recipients[1]
+	if departed.Address != "t0300111" || !departed.Departed {
+		t.Fatalf("第 2 行应为离场 t0300111，得到 %s/departed=%v", departed.Address, departed.Departed)
+	}
+	if departed.ClaimedTotal == nil || !departed.ClaimedTotal.Equal(decimal.RequireFromString("70000000000000000000")) {
+		t.Fatalf("离场行 claimed_total 应为 70e18（含离场行），得到 %v", departed.ClaimedTotal)
+	}
+	// claimed_since_epoch = MIN(first_epoch) = prev+1。
+	if resp.ClaimedSinceEpoch != prev+1 {
+		t.Fatalf("claimed_since_epoch 应为 MIN(first_epoch)=%d，得到 %d", prev+1, resp.ClaimedSinceEpoch)
+	}
+	// 禁 N+1：按地址批量查只调 1 次，且一次带上全部排行地址（活跃 + 离场）。
+	if snap.periodByAddrCalls != 1 {
+		t.Fatalf("按地址批量查应只调 1 次（禁 N+1），实际 %d", snap.periodByAddrCalls)
+	}
+	if len(snap.periodByAddrAddrs) != 2 {
+		t.Fatalf("批量查地址应为 2 个（活跃+离场），得到 %v", snap.periodByAddrAddrs)
+	}
+}
+
+// ② 归集表本周期无行（采集件未上生产 / 本周期内还没归集）⇒ 所有行 claimed_total=nil、since=0，JSON 里是 null。
+func TestRewardStreamLedgerClaimedTotalNilWhenNoCurrentPeriodRows(t *testing.T) {
+	const solstice = int64(6_000_000)
+	cur := solstice + 5
+	snap := &fakeRewardStreamRecipientSnapshot{
+		rows: nil, // 快照表也空
+		// 归集表本周期**无行** ⇒ 累计未知。
+		periodRows: nil,
+		// 即便按地址查能查到历史行，也不该被使用（先探针、后取数）。
+		periodByAddrRows: []*po.RewardStreamRecipientPeriod{
+			periodRow("t0199897", solstice, solstice+1, solstice+9, "100000000000000000000", "1000000000000000000"),
+		},
+		earliest: chain.Epoch(solstice + 1), earliestFound: true,
+	}
+	biz := NewStatisticRewardStreamLedgerBiz(&fakeRewardStreamsSyncer{epoch: cur}, &fakeRewardStreamLedgerSource{ledger: departedActiveLedger(cur)}, snap)
+	biz.solsticeEpoch = solstice
+
+	resp, err := biz.RewardStreamLedger(context.Background(), filscan.RewardStreamLedgerRequest{})
+	if err != nil {
+		t.Fatalf("不应报错: %s", err)
+	}
+	if resp.ClaimedSinceEpoch != 0 {
+		t.Fatalf("无本周期行时 claimed_since_epoch 应为 0（未知），得到 %d", resp.ClaimedSinceEpoch)
+	}
+	for _, r := range resp.Recipients {
+		if r.ClaimedTotal != nil {
+			t.Fatalf("%s 在本周期无归集行时应 claimed_total=nil（未知），得到 %v", r.Address, r.ClaimedTotal)
+		}
+	}
+	// 断言 JSON 里就是 null（不是 0）。
+	b, err := json.Marshal(resp)
+	if err != nil {
+		t.Fatalf("序列化响应失败: %s", err)
+	}
+	if !strings.Contains(string(b), `"claimed_total":null`) {
+		t.Fatalf("响应 JSON 应含 \"claimed_total\":null，得到 %s", string(b))
+	}
+	if snap.periodByAddrCalls != 0 {
+		t.Fatalf("探针为空时不应再按地址查（禁臆造 0），实际 %d", snap.periodByAddrCalls)
+	}
+}
+
+// ③ 有数据（本周期有归集行）但某地址无任何周期行 ⇒ ClaimedTotal=0（非 nil，与「未知」区分）。
+func TestRewardStreamLedgerClaimedTotalZeroWhenAddressHasNoRows(t *testing.T) {
+	const solstice = int64(6_000_000)
+	periodLen := int64(buildconstants.SolsticeEpochsPerQuarter)
+	cur := solstice + 2*periodLen + 5
+	start := solstice + 2*periodLen
+	snap := &fakeRewardStreamRecipientSnapshot{
+		// 本周期有行（有数据）⇒ 不是「未知」。
+		periodRows: []*po.RewardStreamRecipientPeriod{
+			periodRow("t0199897", start, cur-1, cur-1, "0", "1000000000000000000"),
+		},
+		// 按地址查只返回**别的**地址的行 ⇒ t0199897 无行 ⇒ 0。
+		periodByAddrRows: []*po.RewardStreamRecipientPeriod{
+			periodRow("t0999999", start, cur-1, cur-1, "123000000000000000000", "0"),
+		},
+		earliest: chain.Epoch(cur - 1), earliestFound: true,
+	}
+	biz := NewStatisticRewardStreamLedgerBiz(&fakeRewardStreamsSyncer{epoch: cur}, &fakeRewardStreamLedgerSource{ledger: departedActiveLedger(cur)}, snap)
+	biz.solsticeEpoch = solstice
+
+	resp, err := biz.RewardStreamLedger(context.Background(), filscan.RewardStreamLedgerRequest{})
+	if err != nil {
+		t.Fatalf("不应报错: %s", err)
+	}
+	if len(resp.Recipients) != 1 {
+		t.Fatalf("应只返回 1 个活跃受益方，得到 %d", len(resp.Recipients))
+	}
+	active := resp.Recipients[0]
+	if active.ClaimedTotal == nil {
+		t.Fatal("有数据时无行的地址应 claimed_total=0（非 nil）")
+	}
+	if !active.ClaimedTotal.IsZero() {
+		t.Fatalf("无行地址 claimed_total 应为 0，得到 %s", active.ClaimedTotal)
+	}
+	if resp.ClaimedSinceEpoch != cur-1 {
+		t.Fatalf("有数据时 claimed_since_epoch 应为 %d，得到 %d", cur-1, resp.ClaimedSinceEpoch)
+	}
+}
+
+// ④ 快照表完全空（被修剪）时，仅靠归集表也能识别「本期离场」，且 last_share_pct 取自归集表 last_share。
+func TestRewardStreamLedgerDepartedFromPeriodOnly(t *testing.T) {
+	const solstice = int64(6_000_000)
+	periodLen := int64(buildconstants.SolsticeEpochsPerQuarter)
+	cur := solstice + 2*periodLen + 5
+	start := solstice + 2*periodLen
+	snap := &fakeRewardStreamRecipientSnapshot{
+		rows: nil, // 快照表为空（HistoryClear 已修剪 / 尚未建）
+		periodRows: []*po.RewardStreamRecipientPeriod{
+			periodRow("t0300111", start, cur-30, cur-3, "42000000000000000000", "737500000000000000"),
+		},
+	}
+	biz := NewStatisticRewardStreamLedgerBiz(&fakeRewardStreamsSyncer{epoch: cur}, &fakeRewardStreamLedgerSource{ledger: departedActiveLedger(cur)}, snap)
+	biz.solsticeEpoch = solstice
+
+	resp, err := biz.RewardStreamLedger(context.Background(), filscan.RewardStreamLedgerRequest{})
+	if err != nil {
+		t.Fatalf("不应报错: %s", err)
+	}
+	if snap.calls != 1 {
+		t.Fatalf("快照仍应被查 1 次（即便为空），实际 %d", snap.calls)
+	}
+	if len(resp.Recipients) != 2 {
+		t.Fatalf("应返回 2 行（1 活跃 + 1 离场），得到 %d", len(resp.Recipients))
+	}
+	d := resp.Recipients[1]
+	if d.Address != "t0300111" || !d.Departed {
+		t.Fatalf("第 2 行应为离场 t0300111，得到 %s/departed=%v", d.Address, d.Departed)
+	}
+	if d.LastSharePct != "73.75" {
+		t.Fatalf("last_share_pct 应取自归集表 last_share（73.75），得到 %s", d.LastSharePct)
+	}
+	if d.LeftEpoch != cur-3 {
+		t.Fatalf("left_epoch 应取归集表 last_epoch=%d，得到 %d", cur-3, d.LeftEpoch)
+	}
+	if !d.ClaimedPeriod.Equal(decimal.RequireFromString("42000000000000000000")) {
+		t.Fatalf("离场行 claimed_period 应取归集表 claimed_in_period=42e18，得到 %s", d.ClaimedPeriod)
+	}
+	// 纯归集来源无 payable ⇒ 结转记 0，不臆造。
+	if !d.PendingClaimCarried.IsZero() || !d.PendingClaim.IsZero() {
+		t.Fatalf("纯归集来源离场行 carried/pending 应为 0，得到 %s/%s", d.PendingClaimCarried, d.PendingClaim)
+	}
+}
+
+// ⑤ 归集表与快照表查询**都报错**时两条路径均降级：接口不报错、无 departed 行、claimed_total 全 nil、since=0，并打 WARN。
+func TestRewardStreamLedgerClaimedAndDepartedSourcesErrorDegrade(t *testing.T) {
+	const solstice = int64(6_000_000)
+	cur := solstice + 5
+	logs := captureBizLogs(t)
+	snap := &fakeRewardStreamRecipientSnapshot{
+		err:             errors.New(`relation "chain.reward_stream_recipient_epoch" does not exist`),
+		periodErr:       errors.New(`relation "chain.reward_stream_recipient_period" does not exist`),
+		periodByAddrErr: errors.New("boom"),
+		earliestErr:     errors.New("boom"),
+	}
+	biz := NewStatisticRewardStreamLedgerBiz(&fakeRewardStreamsSyncer{epoch: cur}, &fakeRewardStreamLedgerSource{ledger: departedActiveLedger(cur)}, snap)
+	biz.solsticeEpoch = solstice
+
+	resp, err := biz.RewardStreamLedger(context.Background(), filscan.RewardStreamLedgerRequest{})
+	if err != nil {
+		t.Fatalf("任一来源失败都不得向上抛错: %s", err)
+	}
+	if !resp.Nv29 {
+		t.Fatal("降级不应影响 nv29（仍按当前链上状态返回）")
+	}
+	if len(resp.Recipients) != 1 || resp.Recipients[0].Departed {
+		t.Fatalf("降级时应只返回当前活跃受益方、无 departed 行，得到 %d 行", len(resp.Recipients))
+	}
+	for _, r := range resp.Recipients {
+		if r.ClaimedTotal != nil {
+			t.Fatalf("查询失败时 claimed_total 应全 nil，得到 %v", r.ClaimedTotal)
+		}
+	}
+	if resp.ClaimedSinceEpoch != 0 {
+		t.Fatalf("查询失败时 claimed_since_epoch 应为 0，得到 %d", resp.ClaimedSinceEpoch)
+	}
+	got := logs.String()
+	if !strings.Contains(got, "快照失败") || !strings.Contains(got, "归集失败") {
+		t.Fatalf("快照/归集两来源失败都应打 WARN，实际日志:\n%s", got)
+	}
+	if snap.periodByAddrCalls != 0 {
+		t.Fatalf("探针（本周期行）已失败，不应再按地址查，实际 %d", snap.periodByAddrCalls)
+	}
+}
+
+// ⑥ 「累计」≠「当期」：构造既无当期应计又有历史结转的行，验证 claimed_total ≠ claimed_period。
+func TestRewardStreamLedgerClaimedTotalDiffersFromCurrentPeriod(t *testing.T) {
+	const solstice = int64(4_000_000)
+	cur := int64(4139065) // caliZeroShareLedgerJSON 的高度
+	periodLen := int64(buildconstants.SolsticeEpochsPerQuarter)
+	start := periodStartEpoch(solstice, cur, periodLen)
+	snap := &fakeRewardStreamRecipientSnapshot{
+		periodRows: []*po.RewardStreamRecipientPeriod{
+			periodRow("t0200442", start, cur-1, cur-1, "5000000000000000000", "0"),
+		},
+		periodByAddrRows: []*po.RewardStreamRecipientPeriod{
+			periodRow("t0200442", start, cur-1, cur-1, "5000000000000000000", "0"),
+		},
+		earliest: chain.Epoch(cur - 1), earliestFound: true,
+	}
+	// 这份账本里 t0200442 是「活跃流、份额 0」：当期应计 0、本期已提 0，但历史已提 5 FIL 藏在归集表。
+	biz := NewStatisticRewardStreamLedgerBiz(&fakeRewardStreamsSyncer{epoch: cur}, &fakeRewardStreamLedgerSource{ledger: mustLedger(t, caliZeroShareLedgerJSON)}, snap)
+	biz.solsticeEpoch = solstice
+
+	resp, err := biz.RewardStreamLedger(context.Background(), filscan.RewardStreamLedgerRequest{})
+	if err != nil {
+		t.Fatalf("不应报错: %s", err)
+	}
+	var row *filscan.RewardStreamRecipient
+	for _, r := range resp.Recipients {
+		if r.Address == "t0200442" {
+			row = r
+		}
+	}
+	if row == nil {
+		t.Fatal("应返回 t0200442")
+	}
+	if !row.ClaimedPeriod.IsZero() {
+		t.Fatalf("当期已提应为 0，得到 %s", row.ClaimedPeriod)
+	}
+	if row.ClaimedTotal == nil || !row.ClaimedTotal.Equal(decimal.RequireFromString("5000000000000000000")) {
+		t.Fatalf("累计已收应为 5e18，得到 %v", row.ClaimedTotal)
+	}
+	if row.ClaimedTotal.Equal(row.ClaimedPeriod) {
+		t.Fatal("累计(claimed_total) 不应等于当期(claimed_period)")
 	}
 }

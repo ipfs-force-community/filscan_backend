@@ -123,6 +123,25 @@ type RewardStreamRecipientPeriodTask interface {
 	DeleteRewardStreamRecipientPeriodsGteEpoch(ctx context.Context, gteEpoch chain.Epoch) (err error)
 }
 
+// RewardStreamRecipientPeriodReader 「奖励流受益方按周期归集」表的**展示侧只读**路径。
+//
+// 为什么单列一个接口（而不是并入 RewardStreamRecipientPeriodTask）：Task 是采集侧写仓储，
+// 采集侧假实现（同步器计算器单测）只实现写路径；展示层要用的两个新读方法若塞进 Task，
+// 会强迫采集侧测试也补齐它们（跨层耦合）。这里按「写 / 读」分层：Task 保持写口径不变，
+// Reader 只描述展示层批量读取。dal 侧同一实现同时满足两者。
+type RewardStreamRecipientPeriodReader interface {
+	// ListRewardStreamRecipientPeriodsByAddresses 按地址批量取该地址的全部周期行（供上层 SUM 出累计已收）。
+	// 按 (address asc, period_start_epoch asc) 定序返回。空地址切片返回 nil、不发 SQL。
+	ListRewardStreamRecipientPeriodsByAddresses(ctx context.Context, addresses []string) (items []*po.RewardStreamRecipientPeriod, err error)
+	// ListRewardStreamRecipientPeriodsByPeriodStart 取某周期起点的**全部受益方行**（按 address 升序）。
+	// 供展示层判定「本周期出现过的人」（与快照表并集，去重后作为离场判定来源），并作为
+	// 「采集件是否已开始归集本周期」的探针（空 ⇒ 本周期尚无归集，累计未知）。
+	ListRewardStreamRecipientPeriodsByPeriodStart(ctx context.Context, periodStart chain.Epoch) (items []*po.RewardStreamRecipientPeriod, err error)
+	// EarliestRewardStreamRecipientPeriodEpoch 全表 MIN(first_epoch)：累计已收「自何高度起有效」。
+	// 表为空（无任何归集行）⇒ found=false、epoch=0；否则 found=true 并回传最小观测起点。
+	EarliestRewardStreamRecipientPeriodEpoch(ctx context.Context) (epoch chain.Epoch, found bool, err error)
+}
+
 type MinerRewardRange interface {
 	// MinerBlockRewardRange 逐 epoch 出块奖励（单矿工），区间左闭右开 [start, end)，
 	// 对齐聚合器端点 miner_blockreward 的分组口径（按 epoch 分组，按 epoch 升序返回）。

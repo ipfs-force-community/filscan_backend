@@ -15,13 +15,39 @@ import (
 // 表结构与口径见 migration/37.reward_stream_recipient_epoch.sql。
 
 func NewRewardStreamRecipientDal(db *gorm.DB) *RewardStreamRecipientDal {
-	return &RewardStreamRecipientDal{BaseDal: _dal.NewBaseDal(db)}
+	return &RewardStreamRecipientDal{
+		BaseDal: _dal.NewBaseDal(db),
+		// 同一 db 构造归集表 dal：展示层把两张「受益方来源」表（按高度快照 + 按周期归集）
+		// 交给同一个注入对象，避免改动 biz_statistic.go 的生产装配（见下方读方法转发）。
+		period: NewRewardStreamRecipientPeriodDal(db),
+	}
 }
 
 var _ repository.RewardStreamRecipientTask = (*RewardStreamRecipientDal)(nil)
 
 type RewardStreamRecipientDal struct {
 	*_dal.BaseDal
+	// period 归集表（chain.reward_stream_recipient_period）dal：本类型把它的三个只读方法转发出去，
+	// 使注入的对象同时满足展示层「快照 + 归集」两路只读来源（展示层窄接口定义在 biz 层）。
+	period *RewardStreamRecipientPeriodDal
+}
+
+// 以下三个只读方法把归集表读路径转发给 period dal：展示层用同一个注入对象同时取「快照」与「归集」。
+// 归集表（只增不减、跨周期保留）是「累计已收」与「本周期离场」的可靠来源；快照表仅作 last_share 补充。
+
+// ListRewardStreamRecipientPeriodsByAddresses 见 RewardStreamRecipientPeriodDal 同名方法。
+func (s RewardStreamRecipientDal) ListRewardStreamRecipientPeriodsByAddresses(ctx context.Context, addresses []string) ([]*po.RewardStreamRecipientPeriod, error) {
+	return s.period.ListRewardStreamRecipientPeriodsByAddresses(ctx, addresses)
+}
+
+// ListRewardStreamRecipientPeriodsByPeriodStart 见 RewardStreamRecipientPeriodDal 同名方法。
+func (s RewardStreamRecipientDal) ListRewardStreamRecipientPeriodsByPeriodStart(ctx context.Context, periodStart chain.Epoch) ([]*po.RewardStreamRecipientPeriod, error) {
+	return s.period.ListRewardStreamRecipientPeriodsByPeriodStart(ctx, periodStart)
+}
+
+// EarliestRewardStreamRecipientPeriodEpoch 见 RewardStreamRecipientPeriodDal 同名方法。
+func (s RewardStreamRecipientDal) EarliestRewardStreamRecipientPeriodEpoch(ctx context.Context) (chain.Epoch, bool, error) {
+	return s.period.EarliestRewardStreamRecipientPeriodEpoch(ctx)
 }
 
 // SaveRewardStreamRecipients 批量 upsert：冲突键 (epoch, address)，命中即覆盖

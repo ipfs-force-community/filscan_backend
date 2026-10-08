@@ -19,6 +19,7 @@ func NewRewardStreamRecipientPeriodDal(db *gorm.DB) *RewardStreamRecipientPeriod
 }
 
 var _ repository.RewardStreamRecipientPeriodTask = (*RewardStreamRecipientPeriodDal)(nil)
+var _ repository.RewardStreamRecipientPeriodReader = (*RewardStreamRecipientPeriodDal)(nil)
 
 type RewardStreamRecipientPeriodDal struct {
 	*_dal.BaseDal
@@ -30,6 +31,10 @@ type RewardStreamRecipientPeriodDal struct {
 //	claimed_in_period = GREATEST(已存, excluded)   —— 取值最大的观测（周期内已提单调不减）
 //	first_epoch       = LEAST(已存, excluded)
 //	last_epoch        = GREATEST(已存, excluded)
+//	last_share        = 取「观测高度更大」那一行的值：
+//	                    CASE WHEN excluded.last_epoch >= 已存.last_epoch THEN excluded.last_share
+//	                         ELSE 已存.last_share END
+//	                    （同高度重跑 ⇒ 取新值，同日同值；新观测更旧 ⇒ 保留已存，绝不用陈旧份额盖掉更新的）
 //
 // 注意：本表**非分区**（见 migration 头注释），所以这里可以安全使用 ON CONFLICT；
 // 若日后把它改成按 epoch 分区的 chain 表（带 INSERT 规则），ON CONFLICT 会被 PG 拒绝。
@@ -53,6 +58,12 @@ func (s RewardStreamRecipientPeriodDal) UpsertRewardStreamRecipientPeriods(ctx c
 					Column: clause.Column{Name: "last_epoch"},
 					Value:  gorm.Expr("GREATEST(chain.reward_stream_recipient_period.last_epoch, excluded.last_epoch)"),
 				},
+				{
+					// last_share 只在「新观测不比已存更旧」时替换：确保留存的是最近一次观测到的份额。
+					Column: clause.Column{Name: "last_share"},
+					Value: gorm.Expr("CASE WHEN excluded.last_epoch >= chain.reward_stream_recipient_period.last_epoch " +
+						"THEN excluded.last_share ELSE chain.reward_stream_recipient_period.last_share END"),
+				},
 			}),
 		}).CreateInBatches(items, 100).Error
 	})
@@ -73,6 +84,41 @@ func (s RewardStreamRecipientPeriodDal) ListRewardStreamRecipientPeriodsByAddres
 		Order("address asc, period_start_epoch asc").
 		Find(&items).Error
 	return
+}
+
+// ListRewardStreamRecipientPeriodsByPeriodStart 取某周期起点的全部受益方行（按 address 升序）。
+// 供展示层「本周期离场」判定（与快照表并集去重），也用作「本周期是否已开始归集」的探针。
+func (s RewardStreamRecipientPeriodDal) ListRewardStreamRecipientPeriodsByPeriodStart(ctx context.Context, periodStart chain.Epoch) (items []*po.RewardStreamRecipientPeriod, err error) {
+	tx, err := s.DB(ctx)
+	if err != nil {
+		return
+	}
+	err = tx.Where("period_start_epoch = ?", periodStart.Int64()).
+		Order("address asc").
+		Find(&items).Error
+	return
+}
+
+// EarliestRewardStreamRecipientPeriodEpoch 全表 MIN(first_epoch)：累计已收「自何高度起有效」。
+// 表为空（无任何归集行）⇒ found=false、epoch=0。用 *int64 承接 NULL，避免把「无数据」误当 0。
+func (s RewardStreamRecipientPeriodDal) EarliestRewardStreamRecipientPeriodEpoch(ctx context.Context) (epoch chain.Epoch, found bool, err error) {
+	tx, err := s.DB(ctx)
+	if err != nil {
+		return
+	}
+	var agg struct {
+		MinFirstEpoch *int64
+	}
+	err = tx.Model(&po.RewardStreamRecipientPeriod{}).
+		Select("min(first_epoch) as min_first_epoch").
+		Scan(&agg).Error
+	if err != nil {
+		return
+	}
+	if agg.MinFirstEpoch == nil {
+		return 0, false, nil
+	}
+	return chain.Epoch(*agg.MinFirstEpoch), true, nil
 }
 
 // DeleteRewardStreamRecipientPeriodsGteEpoch 删除 last_epoch >= gteEpoch 的行（链回滚）。
