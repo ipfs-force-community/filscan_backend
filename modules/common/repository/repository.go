@@ -85,6 +85,24 @@ type RewardTask interface {
 	DeleteMinerRewardStats(ctx context.Context, gteEpoch chain.Epoch) (err error)
 }
 
+// RewardStreamRecipientTask 「奖励流受益方按高度快照」表 chain.reward_stream_recipient_epoch 的读写仓储
+// （采集侧）：同步器每个高度用 Save 落一行/受益地址，回滚与历史清理各一个删除方法。
+//
+// 幂等约定：唯一键 (epoch, address)，Save 为批量 upsert（同 (epoch,address) 覆盖），
+// 同一高度重跑不产生重复行。表结构与口径见 migration/37.reward_stream_recipient_epoch.sql。
+type RewardStreamRecipientTask interface {
+	// SaveRewardStreamRecipients 批量 upsert（同 (epoch, address) 覆盖）。
+	// 空切片表示该高度没有受益方（不写、也不删旧行）：正常链上必有流，空多半是调用方判空后的省调用。
+	SaveRewardStreamRecipients(ctx context.Context, items []*po.RewardStreamRecipientEpoch) (err error)
+	// ListRewardStreamRecipientsByEpochRange 按 epoch 区间取（左闭右闭），
+	// 供展示端聚合「本周期出现过的人」。按 (epoch asc, address asc) 定序返回。
+	ListRewardStreamRecipientsByEpochRange(ctx context.Context, epochs chain.LCRCRange) (items []*po.RewardStreamRecipientEpoch, err error)
+	// DeleteRewardStreamRecipientsGteEpoch 删除 epoch >= gteEpoch 的行（链回滚用）。
+	DeleteRewardStreamRecipientsGteEpoch(ctx context.Context, gteEpoch chain.Epoch) (err error)
+	// DeleteRewardStreamRecipientsLteEpoch 删除 epoch <= lteEpoch 的行（历史清理 / HistoryClear 用）。
+	DeleteRewardStreamRecipientsLteEpoch(ctx context.Context, lteEpoch chain.Epoch) (err error)
+}
+
 type MinerRewardRange interface {
 	// MinerBlockRewardRange 逐 epoch 出块奖励（单矿工），区间左闭右开 [start, end)，
 	// 对齐聚合器端点 miner_blockreward 的分组口径（按 epoch 分组，按 epoch 升序返回）。
