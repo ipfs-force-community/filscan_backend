@@ -402,27 +402,72 @@ func (a IndexAclImpl) GetTotalQualityPower(ctx context.Context, epoch chain.Epoc
 	return
 }
 
-func (a IndexAclImpl) GetTotalRewards(ctx context.Context, epoch chain.Epoch) (totalRewards decimal.Decimal, err error) {
+// RewardStreamTotals 首页「累计奖励三股 + 累计铸造量」（attoFIL，f02 原始**累计计数器**，不是 24h 差分）。
+//
+// 口径（契约 A2）：
+//   - Minted  = 累计铸造量：v19 = TotalMintedReward；v18 = 矿工实收（否则前端 minted 显示 0、与矿工行矛盾）；
+//   - Miner   = 累计矿工实收：MinerMinted()（v18 即历史字段 TotalStoragePowerReward）；
+//   - Service = 累计服务流（记在 f02、待受益方 Claim 提取）：TotalExplicitMinted，v18 恒 0；
+//   - Burn    = 累计「铸造即销毁」：TotalBurnMinted，v18 恒 0。
+//
+// OK=false 表示 f02 状态取数/反序列化失败，此时四个金额均为零值，调用方按「无数据」处理（首页不 500）。
+type RewardStreamTotals struct {
+	Minted  decimal.Decimal
+	Miner   decimal.Decimal
+	Service decimal.Decimal
+	Burn    decimal.Decimal
+	OK      bool
+}
+
+// rewardStreamTotalsFromDetail 纯函数：由 f02 奖励 actor 状态算出累计三股。
+// v18 判定用「三个 NV29 计数器全为 0」——结构体无 omitempty，v18 行这三项都是 "0"。
+func rewardStreamTotalsFromDetail(d londobell.RewardActorDetail) RewardStreamTotals {
+	miner := d.MinerMinted()
+	if d.TotalMintedReward.IsZero() && d.TotalBurnMinted.IsZero() && d.TotalExplicitMinted.IsZero() {
+		// NV29 之前：状态里只有 TotalStoragePowerReward（本身即矿工实收），无三计数器。
+		return RewardStreamTotals{Minted: miner, Miner: miner, Service: decimal.Zero, Burn: decimal.Zero, OK: true}
+	}
+	return RewardStreamTotals{
+		Minted:  d.TotalMintedReward,
+		Miner:   miner,
+		Service: d.TotalExplicitMinted,
+		Burn:    d.TotalBurnMinted,
+		OK:      true,
+	}
+}
+
+// GetRewardStreamTotals 读 f02 奖励 actor 状态一次，产出累计三股 + 累计铸造量（首页用）。
+//
+// 与 GetTotalRewards 走**同一条** adapter.Actor(f02) 链路：首页若要同时用到 total_rewards 与这四个
+// 新字段，只调用本方法一次即可，**不得再单独调 GetTotalRewards**（否则首页对节点的 f02 取数翻倍）。
+func (a IndexAclImpl) GetRewardStreamTotals(ctx context.Context, epoch chain.Epoch) (totals RewardStreamTotals, err error) {
 	actorID := chain.SmartAddress("02")
 	actor, err := a.adapter.Actor(ctx, actorID, &epoch)
 	if err != nil {
-		return
+		return RewardStreamTotals{}, err
 	}
 	var actorState []byte
 	if actor != nil {
 		actorState, err = json.Marshal(actor.State)
 		if err != nil {
-			return
+			return RewardStreamTotals{}, err
 		}
 	}
-	rewardState := londobell.RewardActorState{}
-	err = json.Unmarshal(actorState, &rewardState)
-	if err != nil {
-		return
+	detail := londobell.RewardActorDetail{}
+	if err = json.Unmarshal(actorState, &detail); err != nil {
+		return RewardStreamTotals{}, err
 	}
-	// NV29(Solstice)：同上，总奖励也用「矿工出块奖励」口径
-	totalRewards = rewardState.MinerMinted()
-	return
+	return rewardStreamTotalsFromDetail(detail), nil
+}
+
+func (a IndexAclImpl) GetTotalRewards(ctx context.Context, epoch chain.Epoch) (totalRewards decimal.Decimal, err error) {
+	// NV29(Solstice)：总奖励用「矿工出块奖励」口径（v18 = TotalStoragePowerReward，
+	// v19 = TotalMinted − TotalBurn − TotalExplicit）；转发到 GetRewardStreamTotals 复用同一次取数链路。
+	totals, err := a.GetRewardStreamTotals(ctx, epoch)
+	if err != nil {
+		return decimal.Zero, err
+	}
+	return totals.Miner, nil
 }
 
 func (a IndexAclImpl) GetActiveMiners(ctx context.Context, epoch chain.Epoch) (count int64, err error) {

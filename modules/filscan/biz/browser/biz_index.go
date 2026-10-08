@@ -157,12 +157,15 @@ func (i *IndexBiz) getTotalIndicators(ctx context.Context, req filscan.TotalIndi
 		log.Errorf("totalQualityPower: %s", err.Error())
 	}
 
-	// 获取全网出块奖励
-	var totalRewards decimal.Decimal
-	totalRewards, err = i.GetTotalRewards(ctx, epoch)
-	if err != nil {
-		log.Errorf("totalRewards: %s", err.Error())
+	// 累计奖励三股 + 累计铸造量：与 total_rewards **复用同一次** f02 取数（首页不新增节点/聚合器调用）。
+	// 取数失败 ⇒ 四者置 0 + WARN，首页不 500（与近24h三流同一兜底策略）。
+	rewardTotals, rewardTotalsErr := i.GetRewardStreamTotals(ctx, epoch)
+	if rewardTotalsErr != nil {
+		log.Warnf("reward_stream_totals: 读 f02 累计计数器失败: %s，累计铸造量/三股置 0（首页不 500）", rewardTotalsErr)
 	}
+	// total_rewards 语义不变：仍是累计矿工实收（MinerMinted）。
+	totalRewards := rewardTotals.Miner
+	rewardStreamMintedTotal, rewardStreamMinerTotal, rewardStreamServiceTotal, rewardStreamBurnMintedTotal := rewardStreamTotalsIndicators(rewardTotals)
 	// 获取近24h增长算力
 	var powerIncrease24H decimal.Decimal
 	powerIncrease24H, err = i.GetPowerIncrease24H(ctx, epoch)
@@ -297,20 +300,25 @@ func (i *IndexBiz) getTotalIndicators(ctx context.Context, req filscan.TotalIndi
 		RewardStreamService24H: rewardStreamService24H,
 		RewardStreamBurn24H:    rewardStreamBurn24H,
 		RewardStreamTotal24H:   rewardStreamTotal24H,
-		NV29Epoch:              nv29Epoch,
-		WinCountReward:         winCountReward,
-		AvgBlockCount:          avgBlockCount,
-		AvgMessageCount:        avgMessageCount,
-		ActiveMiners:           activeMiner,
-		Burnt:                  burnt,
-		CirculatingPercent:     circulatingPercent,
-		GasIn32G:               gasCost32G,
-		AddPowerIn32G:          addPower32G,
-		GasIn64G:               gasCost64G,
-		AddPowerIn64G:          addPower64G,
-		Sum:                    sum,
-		ContractGas:            contractGas,
-		Others:                 sum.Sub(contractGas),
+		// 累计奖励三股 + 累计铸造量（同一次 f02 取数，见上方 GetRewardStreamTotals；失败置 0）。
+		RewardStreamMintedTotal:     rewardStreamMintedTotal,
+		RewardStreamMinerTotal:      rewardStreamMinerTotal,
+		RewardStreamServiceTotal:    rewardStreamServiceTotal,
+		RewardStreamBurnMintedTotal: rewardStreamBurnMintedTotal,
+		NV29Epoch:                   nv29Epoch,
+		WinCountReward:              winCountReward,
+		AvgBlockCount:               avgBlockCount,
+		AvgMessageCount:             avgMessageCount,
+		ActiveMiners:                activeMiner,
+		Burnt:                       burnt,
+		CirculatingPercent:          circulatingPercent,
+		GasIn32G:                    gasCost32G,
+		AddPowerIn32G:               addPower32G,
+		GasIn64G:                    gasCost64G,
+		AddPowerIn64G:               addPower64G,
+		Sum:                         sum,
+		ContractGas:                 contractGas,
+		Others:                      sum.Sub(contractGas),
 	}
 
 	// NV29(FIP-0118) 之后 FIL+ 已冻结：dc 归零、cc = raw（质量增益不再等于 datacap 算力）。
@@ -443,4 +451,14 @@ func rewardStreamIndicators24H(deltas acl.RewardStreamDeltas24H) (miner, service
 		return decimal.Zero, decimal.Zero, decimal.Zero, decimal.Zero
 	}
 	return deltas.Miner, deltas.Service, deltas.Burn, deltas.Total
+}
+
+// rewardStreamTotalsIndicators 把 acl 的累计三股映射成首页四个金额字段（铸造量/矿工/服务流/销毁）。
+// 兜底：totals.OK=false（f02 取数失败）⇒ 四者全 0（首页不 500、不 panic）。
+// 纯函数，便于单测覆盖「调用方置 0」这条路径。
+func rewardStreamTotalsIndicators(totals acl.RewardStreamTotals) (minted, miner, service, burn decimal.Decimal) {
+	if !totals.OK {
+		return decimal.Zero, decimal.Zero, decimal.Zero, decimal.Zero
+	}
+	return totals.Minted, totals.Miner, totals.Service, totals.Burn
 }

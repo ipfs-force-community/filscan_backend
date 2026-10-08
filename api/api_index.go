@@ -68,18 +68,28 @@ type TotalIndicators struct {
 	RewardStreamService24H decimal.Decimal `json:"reward_stream_service_24h"` // 近24h服务流
 	RewardStreamBurn24H    decimal.Decimal `json:"reward_stream_burn_24h"`    // 近24h销毁
 	RewardStreamTotal24H   decimal.Decimal `json:"reward_stream_total_24h"`   // 近24h铸造量合计
-	NV29Epoch              int64           `json:"nv29_epoch"`                // NV29 激活高度；<=0/未排期 表示本网未激活
-	GasIn32G               decimal.Decimal `json:"gas_in_32g"`                // 32GiB扇区Gas消耗，单位Fil/T
-	AddPowerIn32G          decimal.Decimal `json:"add_power_in_32g"`          // 32GiB扇区新增算力成本，单位Fil/T
-	GasIn64G               decimal.Decimal `json:"gas_in_64g"`                // 64GiB扇区Gas消耗，单位Fil/T
-	AddPowerIn64G          decimal.Decimal `json:"add_power_in_64g"`          // 64GiB扇区新增算力成本，单位Fil/T
-	WinCountReward         decimal.Decimal `json:"win_count_reward"`          // 每赢票奖励，单位Fil
-	AvgBlockCount          decimal.Decimal `json:"avg_block_count"`           // 平均每高度区块数量
-	AvgMessageCount        float64         `json:"avg_message_count"`         // 平均每高度消息数
-	ActiveMiners           int64           `json:"active_miners"`             // 活跃节点数
-	Burnt                  decimal.Decimal `json:"burnt"`                     // 销毁量
-	CirculatingPercent     decimal.Decimal `json:"circulating_percent"`       // 流通率
-	Sum                    decimal.Decimal `json:"sum"`
-	ContractGas            decimal.Decimal `json:"contract_gas"`
-	Others                 decimal.Decimal `json:"others"`
+	// NV29(FIP-0118) 累计奖励三股 + 累计铸造量（attoFIL，f02 原始计数器累计值，非 24h 差分）。
+	// 口径见 acl.GetRewardStreamTotals：v18 时 minted=miner（否则前端显示 0 与矿工行矛盾）、
+	// service/burn 恒 0；v19 时 minted=TotalMintedReward、service=TotalExplicitMinted、burn=TotalBurnMinted。
+	// 取数失败时四者置 0（首页不 500）。
+	RewardStreamMintedTotal  decimal.Decimal `json:"reward_stream_minted_total"`  // 累计铸造量（三股之和）
+	RewardStreamMinerTotal   decimal.Decimal `json:"reward_stream_miner_total"`   // 累计矿工实收
+	RewardStreamServiceTotal decimal.Decimal `json:"reward_stream_service_total"` // 累计服务流（记在 f02、待受益方提取）
+	// ⚠️ 与上面的 burnt(f099 账户余额全量：gas 燃烧+罚没+历史销毁) 是**两个不同口径**：
+	// 本字段只计 NV29「铸造即烧」的部分（f02 的 TotalBurnMinted），不是 f099 全量销毁。
+	RewardStreamBurnMintedTotal decimal.Decimal `json:"reward_stream_burn_minted_total"`
+	NV29Epoch                   int64           `json:"nv29_epoch"`          // NV29 激活高度；<=0/未排期 表示本网未激活
+	GasIn32G                    decimal.Decimal `json:"gas_in_32g"`          // 32GiB扇区Gas消耗，单位Fil/T
+	AddPowerIn32G               decimal.Decimal `json:"add_power_in_32g"`    // 32GiB扇区新增算力成本，单位Fil/T
+	GasIn64G                    decimal.Decimal `json:"gas_in_64g"`          // 64GiB扇区Gas消耗，单位Fil/T
+	AddPowerIn64G               decimal.Decimal `json:"add_power_in_64g"`    // 64GiB扇区新增算力成本，单位Fil/T
+	WinCountReward              decimal.Decimal `json:"win_count_reward"`    // 每赢票奖励，单位Fil
+	AvgBlockCount               decimal.Decimal `json:"avg_block_count"`     // 平均每高度区块数量
+	AvgMessageCount             float64         `json:"avg_message_count"`   // 平均每高度消息数
+	ActiveMiners                int64           `json:"active_miners"`       // 活跃节点数
+	Burnt                       decimal.Decimal `json:"burnt"`               // 销毁量：f099(BurntFundsActor) **账户余额全量**（gas 燃烧+罚没+历史销毁）
+	CirculatingPercent          decimal.Decimal `json:"circulating_percent"` // 流通率
+	Sum                         decimal.Decimal `json:"sum"`
+	ContractGas                 decimal.Decimal `json:"contract_gas"`
+	Others                      decimal.Decimal `json:"others"`
 }
