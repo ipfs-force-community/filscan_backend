@@ -3,6 +3,7 @@ package dal
 import (
 	"context"
 
+	"github.com/filecoin-project/go-state-types/builtin"
 	"github.com/shopspring/decimal"
 	"gitlab.forceup.in/fil-data-factory/filscan-backend/modules/common/infra/bo"
 	"gitlab.forceup.in/fil-data-factory/filscan-backend/modules/common/repository"
@@ -36,14 +37,16 @@ func (d DcTrendDal) QueryDCPowers(ctx context.Context, epochs []int64) (items []
 	}
 
 	var rows []dcRawRow
+	// actor 必须用网络感知常量：主网是 f04、calibnet 是 t04。硬编码 'f04' 会让
+	// cali 的 DCTrend 恒返回空（同表 BaseLineTrend 用的是 StoragePowerActorAddr，故它正常）。
 	err = tx.Raw(`
 		select epoch,
 		       (state ->> 'TotalRawBytePower')::decimal    as raw_byte_power,
 		       (state ->> 'TotalQualityAdjPower')::decimal as quality_adj_power
 		from chain.builtin_actor_states
 		where epoch in ?
-		  and actor = 'f04'
-		order by epoch desc`, epochs,
+		  and actor = ?
+		order by epoch desc`, epochs, builtin.StoragePowerActorAddr.String(),
 	).Find(&rows).Error
 	if err != nil {
 		return
