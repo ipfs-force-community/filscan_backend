@@ -15,6 +15,7 @@ import (
 	"gitlab.forceup.in/fil-data-factory/filscan-backend/modules/syncer"
 	"gitlab.forceup.in/fil-data-factory/filscan-backend/pkg/chain"
 	"gitlab.forceup.in/fil-data-factory/filscan-backend/pkg/chain/upgrader"
+	"gitlab.forceup.in/fil-data-factory/filscan-backend/pkg/chain/upgrader/message_detail"
 	"gitlab.forceup.in/fil-data-factory/filscan-backend/pkg/londobell"
 )
 
@@ -77,6 +78,8 @@ func (s *StatisticBaseLineBiz) BaseLineTrend(ctx context.Context, req filscan.Ba
 		if err != nil {
 			return
 		}
+		// 本网 NV29 激活高度；未排期＝0，前端据此画 NV29 解释层竖线。
+		resp.Nv29Epoch = nv29EpochOrZero(message_detail.UpgradeSolsticeHeight.Int64())
 	}
 
 	var prev *filscan.BaseLineTrend
@@ -145,6 +148,7 @@ func (s *StatisticBaseLineBiz) getLatestBaselineTrend(ctx context.Context, prev 
 		return nil
 	}
 
+	full, pending := chain.QualityTierSplit(adj, raw)
 	item := &filscan.BaseLineTrend{
 		TotalQualityAdjPower:  adj,
 		TotalRawBytePower:     raw,
@@ -152,6 +156,8 @@ func (s *StatisticBaseLineBiz) getLatestBaselineTrend(ctx context.Context, prev 
 		ChangeQualityAdjPower: decimal.Decimal{},
 		Timestamp:             epoch.Time().Unix(),
 		Epoch:                 epoch,
+		FullMultiplierPower:   full,
+		PendingUpgradePower:   pending,
 	}
 
 	if prev != nil {

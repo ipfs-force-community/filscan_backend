@@ -72,7 +72,8 @@ type BaseLineTrendRequest struct {
 type BaseLineTrendResponse struct {
 	Epoch     int64
 	BlockTime int64
-	List      []*BaseLineTrend `json:"list"` // 基线走势列表
+	Nv29Epoch int64            `json:"nv29_epoch"` // 本网 NV29 激活高度；未排期＝0
+	List      []*BaseLineTrend `json:"list"`       // 基线走势列表
 }
 
 type ContractTxsTrendRequest struct {
@@ -190,9 +191,13 @@ type BaseLineTrend struct {
 	BaseLinePower         decimal.Decimal `json:"base_line_power"`          // 基线算力
 	ChangeQualityAdjPower decimal.Decimal `json:"change_quality_adj_power"` // 环比变化有效算力
 	Timestamp             int64           `json:"timestamp"`                // 时间戳
-	Epoch                 chain.Epoch     `json:"-"`
+	Epoch                 chain.Epoch     `json:"epoch"`
 	PowerIncrease         decimal.Decimal `json:"power_increase"`
 	PowerDecrease         decimal.Decimal `json:"power_decrease"`
+	// 满倍率算力（10× 档等效原始字节）；口径唯一实现在 chain.QualityTierSplit，前端只渲染、不重算公式。
+	FullMultiplierPower decimal.Decimal `json:"full_multiplier_power"`
+	// 可升级算力（未达满倍率的等效原始字节）；口径唯一实现在 chain.QualityTierSplit，前端只渲染、不重算公式。
+	PendingUpgradePower decimal.Decimal `json:"pending_upgrade_power"`
 }
 
 type BaseFeeTrend struct {

@@ -46,6 +46,7 @@ func (b BaseLinePowerTrendAssembler) ToBaseLineTrendResponse(epoch chain.Epoch, 
 
 func (BaseLinePowerTrendAssembler) ToBaseLineTrend(epoch chain.Epoch, entity *bo.BaseLinePower,
 	increaseQualityAdjPower, powerDecrease, powerIncrease decimal.Decimal) (target *filscan.BaseLineTrend) {
+	full, pending := chain.QualityTierSplit(entity.QualityAdjPower, entity.RawBytePower)
 	target = &filscan.BaseLineTrend{
 		TotalQualityAdjPower:  entity.QualityAdjPower,
 		TotalRawBytePower:     entity.RawBytePower,
@@ -55,6 +56,8 @@ func (BaseLinePowerTrendAssembler) ToBaseLineTrend(epoch chain.Epoch, entity *bo
 		Epoch:                 epoch,
 		PowerDecrease:         powerDecrease,
 		PowerIncrease:         powerIncrease,
+		FullMultiplierPower:   full,
+		PendingUpgradePower:   pending,
 	}
 
 	return
