@@ -132,28 +132,30 @@ func (m MinerBiz) PowerDetail(ctx context.Context, req pro.PowerDetailRequest) (
 	for _, minerID := range minerIDList {
 		for _, power := range minersPower {
 			item := &pro.PowerDetail{
-				Date:              power.Day.Time(),
-				Tag:               minerInfo[minerID].MinerTag,
-				MinerId:           minerID,
-				GroupName:         minerInfo[minerID].GroupName,
-				IsDefault:         minerInfo[minerID].IsDefault,
-				QualityPower:      decimal.Decimal{},
-				RawPower:          decimal.Decimal{},
-				DCPower:           decimal.Decimal{},
-				CCPower:           decimal.Decimal{},
-				SectorSize:        decimal.Decimal{},
-				SectorPowerChange: decimal.Decimal{},
-				SectorCountChange: 0,
-				PledgeChanged:     decimal.Decimal{},
-				PledgeChangedPerT: decimal.Decimal{},
-				Penalty:           decimal.Decimal{},
-				FaultSectors:      0,
+				Date:                power.Day.Time(),
+				Tag:                 minerInfo[minerID].MinerTag,
+				MinerId:             minerID,
+				GroupName:           minerInfo[minerID].GroupName,
+				IsDefault:           minerInfo[minerID].IsDefault,
+				QualityPower:        decimal.Decimal{},
+				RawPower:            decimal.Decimal{},
+				FullMultiplierPower: decimal.Decimal{},
+				PendingUpgradePower: decimal.Decimal{},
+				SectorSize:          decimal.Decimal{},
+				SectorPowerChange:   decimal.Decimal{},
+				SectorCountChange:   0,
+				PledgeChanged:       decimal.Decimal{},
+				PledgeChangedPerT:   decimal.Decimal{},
+				Penalty:             decimal.Decimal{},
+				FaultSectors:        0,
 			}
 			if vv, ok := power.Stats[minerID]; ok {
 				item.QualityPower = vv.QualityAdjPower.Decimal()
 				item.RawPower = vv.RawBytePower.Decimal()
-				item.DCPower = vv.VdcPower.Decimal()
-				item.CCPower = vv.CcPower.Decimal()
+				// VdcPower / CcPower 是 merger 内部字段名（未改名，波及面另评），
+				// 语义已按 NV29 方案 A 改为「满倍率算力 / 待升级算力」。
+				item.FullMultiplierPower = vv.VdcPower.Decimal()
+				item.PendingUpgradePower = vv.CcPower.Decimal()
 				item.SectorSize = vv.SectorSize.Decimal()
 				item.SectorPowerChange = vv.TotalSectorsPowerZero.Decimal()
 				item.SectorCountChange = vv.TotalSectorsZero

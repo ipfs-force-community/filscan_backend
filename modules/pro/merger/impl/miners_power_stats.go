@@ -8,7 +8,6 @@ import (
 	prorepo "gitlab.forceup.in/fil-data-factory/filscan-backend/modules/pro/infra/repo"
 	"gitlab.forceup.in/fil-data-factory/filscan-backend/modules/pro/merger"
 	"gitlab.forceup.in/fil-data-factory/filscan-backend/pkg/chain"
-	"gitlab.forceup.in/fil-data-factory/filscan-backend/pkg/chain/upgrader/message_detail"
 )
 
 type MinersPowerStats interface {
@@ -22,17 +21,17 @@ type minersPowerStats struct {
 }
 
 func (m minersPowerStats) MinersPowerStats(ctx context.Context, miners []chain.SmartAddress, dates chain.DateLCRCRange) (epoch chain.Epoch, stats []*merger.DayPowerStat, err error) {
-	
+
 	epoch, err = m.repo.GetProInfoEpoch(ctx)
 	if err != nil {
 		return
 	}
-	
+
 	//begin := dates.GteBegin.SafeEpochs().GteBegin
 	//if epoch < begin {
 	//	return
 	//}
-	
+
 	date := dates.LteEnd
 	for {
 		var stat *merger.DayPowerStat
@@ -46,32 +45,32 @@ func (m minersPowerStats) MinersPowerStats(ctx context.Context, miners []chain.S
 			break
 		}
 	}
-	
+
 	return
 }
 
 func (m minersPowerStats) dayPowerStat(ctx context.Context, miners []chain.SmartAddress, latest chain.Epoch, date chain.Date) (stat *merger.DayPowerStat, err error) {
-	
+
 	epochs := date.SafeEpochs()
-	
+
 	//if date.IsToday(chain.TimeLoc) {
 	//	if latest < epochs.LtEnd {
 	//		epochs.LtEnd = latest
 	//	}
 	//}
-	
+
 	if latest < epochs.LtEnd {
 		epochs.LtEnd = latest
 		epochs.GteBegin = latest.CurrentDay()
 	}
-	
+
 	//if latest < epochs.LtEnd {
 	//	err = mix.Warnf("sync delay")
 	//	return
 	//}
-	
+
 	fmt.Printf("begin: %s end: %s", epochs.GteBegin, epochs.LtEnd)
-	
+
 	addrs := toAddrStrings(miners)
 	// 准备 0 点的 INFO 计算差异值
 	zeroItems, err := m.repo.GetMinerInfos(ctx, epochs.GteBegin.Int64(), addrs)
@@ -82,23 +81,23 @@ func (m minersPowerStats) dayPowerStat(ctx context.Context, miners []chain.Smart
 	for _, v := range zeroItems {
 		zeroInfos[v.Miner] = v
 	}
-	
+
 	currentInfos, err := m.repo.GetMinerInfos(ctx, epochs.LtEnd.Int64(), addrs)
 	if err != nil {
 		return
 	}
-	
+
 	// 用最新同步时间对齐，而不用链的最新高度
 	funds, err := m.repo.GetMinerFunds(ctx, chain.NewLORCRange(epochs.GteBegin, epochs.LtEnd), addrs)
 	if err != nil {
 		return
 	}
-	
+
 	stat = &merger.DayPowerStat{
 		Day:   date,
 		Stats: map[chain.SmartAddress]*merger.PowerStat{},
 	}
-	
+
 	for _, v := range currentInfos {
 		miner := chain.SmartAddress(v.Miner)
 		item := &merger.PowerStat{
@@ -114,24 +113,20 @@ func (m minersPowerStats) dayPowerStat(ctx context.Context, miners []chain.Smart
 			PenaltyZero:           chain.AttoFil{},
 			FaultSectors:          v.FaultSectors,
 		}
-		
-		// VDC/CC（raw 口径：VdcPower + CcPower = RawBytePower）。
+
+		// 满倍率 / 待升级 两档（raw 口径：VdcPower + CcPower = RawBytePower）。
 		//
-		// 老口径 VDC = (QA-raw)/9 成立的前提是「QA 相对 raw 的超额只可能来自 verified deal 的
-		// 10x」。NV29（Solstice / FIP-0118）之后这个前提没了：带 FULL_QA_POWER 的扇区同样贡献
-		// 9*size 的超额，但 FIP-0118 之后没有 verified deal，这部分属于容量算力（CC）。
-		// 聚合层只有 (QA, raw) 两个数，无法区分「老扇区的 VDW」与「新扇区的 FULL 标志」，
-		// 因此 epoch >= UpgradeSolsticeHeight 时不再反推 VDC，超额一律按容量算力处理。
+		// 口径 chain.QualityTierSplit（NV29/FIP-0118 方案 A），两时代同式、不再按 epoch 分叉：
+		//   VdcPower（语义＝满倍率算力）= (QA-raw)/9  ← 处于 10× 档的等效原始字节
+		//   CcPower （语义＝待升级算力）= raw - 满倍率  ← 未达满倍率的等效原始字节
+		// NV29 前前者恰等于旧 VDC、后者恰等于旧 CC ⇒ 历史不重算、曲线连续。
+		// merger 内部字段名 VdcPower/CcPower 不改（波及面另评），此处只改语义并注明。
 		// 逐 miner 的权威三桶（QA 口径）在 pro.miner_dcs / pro.miner_sectors，由 sector-task
-		// 按 pkg/londobell.QASplit 的新口径写入。
-		if epochs.LtEnd >= message_detail.UpgradeSolsticeHeight {
-			item.VdcPower = chain.Byte{}
-			item.CcPower = item.RawBytePower
-		} else {
-			item.VdcPower = chain.Byte(item.QualityAdjPower.Decimal().Sub(item.RawBytePower.Decimal()).Div(decimal.NewFromInt(9)))
-			item.CcPower = chain.Byte(item.RawBytePower.Decimal().Sub(item.VdcPower.Decimal()))
-		}
-		
+		// 按 pkg/londobell.QASplit 写入——与本节口径不同，勿混用。
+		full, pending := chain.QualityTierSplit(item.QualityAdjPower.Decimal(), item.RawBytePower.Decimal())
+		item.VdcPower = chain.Byte(full)
+		item.CcPower = chain.Byte(pending)
+
 		if vv, ok := zeroInfos[v.Miner]; ok {
 			item.TotalSectorsZero = v.LiveSectors - vv.LiveSectors
 			item.TotalSectorsPowerZero = chain.Byte(decimal.NewFromInt(item.TotalSectorsZero).Mul(item.SectorSize.Decimal()))

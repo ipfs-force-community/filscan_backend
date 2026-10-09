@@ -9,6 +9,7 @@ import (
 	"gitlab.forceup.in/fil-data-factory/filscan-backend/modules/filscan/domain/interval"
 	"gitlab.forceup.in/fil-data-factory/filscan-backend/modules/syncer"
 	"gitlab.forceup.in/fil-data-factory/filscan-backend/pkg/chain"
+	"gitlab.forceup.in/fil-data-factory/filscan-backend/pkg/chain/upgrader/message_detail"
 )
 
 func NewStatisticDcTrendBiz(se repository.SyncerGetter, repo repository.StatisticDcTrendBizRepo) *StatisticDcTrendBiz {
@@ -49,13 +50,20 @@ func (s StatisticDcTrendBiz) DCTrend(ctx context.Context, req filscan.DCTrendReq
 
 	resp.Epoch = current.Epoch
 	resp.BlockTime = chain.Epoch(current.Epoch).Time().Unix()
+	// 本网 NV29 激活高度；未排期＝0。前端据此画 NV29 竖线。
+	resp.Nv29Epoch = nv29EpochOrZero(message_detail.UpgradeSolsticeHeight.Int64())
 
+	// 链上真值（raw / QA）透传；两档倍数由 chain.QualityTierSplit 在此派生，
+	// 保证「一个公式一处实现」：前端只渲染 full_multiplier_power / pending_upgrade_power。
 	for _, v := range r {
+		full, pending := chain.QualityTierSplit(v.QualityAdjPower, v.RawBytePower)
 		resp.Items = append(resp.Items, &filscan.DCTrendItem{
-			Epoch:     v.Epoch,
-			BlockTime: chain.Epoch(v.Epoch).Time().Unix(),
-			Dc:        v.Dc,
-			Cc:        v.Cc,
+			Epoch:               v.Epoch,
+			BlockTime:           chain.Epoch(v.Epoch).Time().Unix(),
+			Raw:                 v.RawBytePower,
+			QualityAdjPower:     v.QualityAdjPower,
+			FullMultiplierPower: full,
+			PendingUpgradePower: pending,
 		})
 	}
 

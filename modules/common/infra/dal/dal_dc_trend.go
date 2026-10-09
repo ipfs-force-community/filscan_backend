@@ -6,8 +6,6 @@ import (
 	"github.com/shopspring/decimal"
 	"gitlab.forceup.in/fil-data-factory/filscan-backend/modules/common/infra/bo"
 	"gitlab.forceup.in/fil-data-factory/filscan-backend/modules/common/repository"
-	"gitlab.forceup.in/fil-data-factory/filscan-backend/pkg/chain"
-	"gitlab.forceup.in/fil-data-factory/filscan-backend/pkg/chain/upgrader/message_detail"
 	"gitlab.forceup.in/fil-data-factory/filscan-backend/utils/_dal"
 	"gorm.io/gorm"
 )
@@ -22,8 +20,8 @@ type DcTrendDal struct {
 	*_dal.BaseDal
 }
 
-// dcRawRow 只承载链上真值（全网 raw / QA），DC/CC 的拆分口径统一走 chain.DcCcSplit，
-// 这样 NV29 前后分流只有一处实现，也便于单测。
+// dcRawRow 只承载链上真值（全网 raw / QA）；算力倍数口径由 biz 层经 chain.QualityTierSplit 派生，
+// 本 DAL 不再做 DC/CC 或倍数拆分。
 type dcRawRow struct {
 	Epoch           int64           `gorm:"column:epoch"`
 	RawBytePower    decimal.Decimal `gorm:"column:raw_byte_power"`
@@ -51,14 +49,11 @@ func (d DcTrendDal) QueryDCPowers(ctx context.Context, epochs []int64) (items []
 		return
 	}
 
-	// NV29(FIP-0118) 之后 FIL+ 已冻结：dc 归零、cc = raw；历史高度保持老口径。
-	solstice := message_detail.UpgradeSolsticeHeight.Int64()
 	for _, r := range rows {
-		dc, cc, _ := chain.DcCcSplit(r.Epoch, solstice, r.QualityAdjPower, r.RawBytePower)
 		items = append(items, &bo.DCPower{
-			Epoch: r.Epoch,
-			Dc:    dc,
-			Cc:    cc,
+			Epoch:           r.Epoch,
+			RawBytePower:    r.RawBytePower,
+			QualityAdjPower: r.QualityAdjPower,
 		})
 	}
 

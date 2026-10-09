@@ -50,18 +50,19 @@ type SearchFNSToken struct {
 // -----------------------首页基础数据结构结构-----------------------
 
 type TotalIndicators struct {
-	LatestHeight       int64           `json:"latest_height"`       // 最新区块高度
-	LatestBlockTime    int64           `json:"latest_block_time"`   // 最新区块时间
-	TotalBlocks        int64           `json:"total_blocks"`        // 全网出块数量
-	TotalRewards       decimal.Decimal `json:"total_rewards"`       // 全网出块奖励，单位Fil
-	TotalQualityPower  decimal.Decimal `json:"total_quality_power"` // 全网有效算力
-	Dc                 decimal.Decimal // DC 算力
-	Cc                 decimal.Decimal // CC 算力
-	BaseFee            decimal.Decimal `json:"base_fee"`             // 当前基础费率
-	MinerInitialPledge decimal.Decimal `json:"miner_initial_pledge"` // 当前扇区质押量
-	PowerIncrease24H   decimal.Decimal `json:"power_increase_24h"`   // 近24h增长算力
-	RewardsIncrease24H decimal.Decimal `json:"rewards_increase_24h"` // 近24h出块奖励
-	FilPerTera24H      decimal.Decimal `json:"fil_per_tera_24h"`     // 近24h产出效率，单位Fil/T
+	LatestHeight      int64           `json:"latest_height"`       // 最新区块高度
+	LatestBlockTime   int64           `json:"latest_block_time"`   // 最新区块时间
+	TotalBlocks       int64           `json:"total_blocks"`        // 全网出块数量
+	TotalRewards      decimal.Decimal `json:"total_rewards"`       // 全网出块奖励，单位Fil
+	TotalQualityPower decimal.Decimal `json:"total_quality_power"` // 全网有效算力
+	// 全网算力倍数结构（NV29/FIP-0118 方案 A）：口径 chain.QualityTierSplit，两时代同式。
+	FullMultiplierPower decimal.Decimal `json:"full_multiplier_power"` // 满倍率算力（处于 10× 档的等效原始字节）
+	PendingUpgradePower decimal.Decimal `json:"pending_upgrade_power"` // 待升级算力（未达满倍率的等效原始字节）
+	BaseFee             decimal.Decimal `json:"base_fee"`              // 当前基础费率
+	MinerInitialPledge  decimal.Decimal `json:"miner_initial_pledge"`  // 当前扇区质押量
+	PowerIncrease24H    decimal.Decimal `json:"power_increase_24h"`    // 近24h增长算力
+	RewardsIncrease24H  decimal.Decimal `json:"rewards_increase_24h"`  // 近24h出块奖励
+	FilPerTera24H       decimal.Decimal `json:"fil_per_tera_24h"`      // 近24h产出效率，单位Fil/T
 	// 近24h区块奖励三流拆分（NV29/FIP-0118，attoFIL 原始计数器差分；fil_per_tera_24h 仍为单数字不拆）。
 	// 口径见 acl.RewardStreamDeltas24H；取数失败时四者置 0。
 	RewardStreamMiner24H   decimal.Decimal `json:"reward_stream_miner_24h"`   // 近24h共识流＝矿工实收

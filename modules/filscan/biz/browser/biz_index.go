@@ -321,11 +321,11 @@ func (i *IndexBiz) getTotalIndicators(ctx context.Context, req filscan.TotalIndi
 		Others:                      sum.Sub(contractGas),
 	}
 
-	// NV29(FIP-0118) 之后 FIL+ 已冻结：dc 归零、cc = raw（质量增益不再等于 datacap 算力）。
-	// 口径实现在 chain.DcCcSplit，与统计页 DCTrend 共用，避免两处再次分叉。
-	dc, cc, _ := chain.DcCcSplit(epoch.Int64(), message_detail.UpgradeSolsticeHeight.Int64(), netPower.QualityPower, netPower.RawBytePower)
-	resp.TotalIndicators.Dc = dc
-	resp.TotalIndicators.Cc = cc
+	// 全网算力倍数结构（NV29/FIP-0118 方案 A）：口径 chain.QualityTierSplit，两时代同式、历史不重算。
+	// 与统计页 DCTrend 共用同一实现，避免两处再次分叉。
+	full, pending := chain.QualityTierSplit(netPower.QualityPower, netPower.RawBytePower)
+	resp.TotalIndicators.FullMultiplierPower = full
+	resp.TotalIndicators.PendingUpgradePower = pending
 
 	return
 }

@@ -135,22 +135,23 @@ type MinerInfoDetail struct {
 }
 
 type PowerDetail struct {
-	Date              time.Time          `json:"date"`
-	Tag               string             `json:"tag"`
-	MinerId           chain.SmartAddress `json:"miner_id"`
-	GroupName         string             `json:"group_name"`
-	IsDefault         bool               `json:"is_default"`
-	QualityPower      decimal.Decimal    `json:"quality_power"`
-	RawPower          decimal.Decimal    `json:"raw_power"`
-	DCPower           decimal.Decimal    `json:"dc_power"`
-	CCPower           decimal.Decimal    `json:"cc_power"`
-	SectorSize        decimal.Decimal    `json:"sector_size"`
-	SectorPowerChange decimal.Decimal    `json:"sector_power_change"`
-	SectorCountChange int64              `json:"sector_count_change"`
-	PledgeChanged     decimal.Decimal    `json:"pledge_changed"`
-	PledgeChangedPerT decimal.Decimal    `json:"pledge_changed_per_t"`
-	Penalty           decimal.Decimal    `json:"penalty"`
-	FaultSectors      int64              `json:"fault_sectors"`
+	Date         time.Time          `json:"date"`
+	Tag          string             `json:"tag"`
+	MinerId      chain.SmartAddress `json:"miner_id"`
+	GroupName    string             `json:"group_name"`
+	IsDefault    bool               `json:"is_default"`
+	QualityPower decimal.Decimal    `json:"quality_power"`
+	RawPower     decimal.Decimal    `json:"raw_power"`
+	// 全网/节点算力倍数结构（NV29/FIP-0118 方案 A）：口径 chain.QualityTierSplit。
+	FullMultiplierPower decimal.Decimal `json:"full_multiplier_power"`
+	PendingUpgradePower decimal.Decimal `json:"pending_upgrade_power"`
+	SectorSize          decimal.Decimal `json:"sector_size"`
+	SectorPowerChange   decimal.Decimal `json:"sector_power_change"`
+	SectorCountChange   int64           `json:"sector_count_change"`
+	PledgeChanged       decimal.Decimal `json:"pledge_changed"`
+	PledgeChangedPerT   decimal.Decimal `json:"pledge_changed_per_t"`
+	Penalty             decimal.Decimal `json:"penalty"`
+	FaultSectors        int64           `json:"fault_sectors"`
 }
 
 type GasCostDetail struct {

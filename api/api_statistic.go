@@ -281,14 +281,19 @@ type DCTrendRequest struct {
 type DCTrendResponse struct {
 	Epoch     int64          `json:"epoch"`
 	BlockTime int64          `json:"block_time"`
-	Items     []*DCTrendItem `json:"items"` // DC占比走势图
+	Nv29Epoch int64          `json:"nv29_epoch"` // 本网 NV29 激活高度；未排期＝0（主网当前为 0）
+	Items     []*DCTrendItem `json:"items"`      // 算力倍数结构走势图
 }
 
 type DCTrendItem struct {
-	Epoch     int64           `json:"epoch"`
-	BlockTime int64           `json:"block_time"`
-	Dc        decimal.Decimal `json:"dc"`
-	Cc        decimal.Decimal `json:"cc"`
+	Epoch           int64           `json:"epoch"`
+	BlockTime       int64           `json:"block_time"`
+	Raw             decimal.Decimal `json:"raw"`               // 链上真值：原始算力
+	QualityAdjPower decimal.Decimal `json:"quality_adj_power"` // 链上真值：有效算力
+	// 算力倍数结构（NV29/FIP-0118 方案 A）：口径唯一实现在 chain.QualityTierSplit，
+	// 前端只渲染、不再自行按 (qa−raw)/9 重算，避免两处口径分叉。
+	FullMultiplierPower decimal.Decimal `json:"full_multiplier_power"` // 满倍率算力（10× 档等效原始字节）
+	PendingUpgradePower decimal.Decimal `json:"pending_upgrade_power"` // 待升级算力（未达满倍率的等效原始字节）
 }
 
 // -----------------------区块奖励流向（NV29/FIP-0118）-----------------------//
