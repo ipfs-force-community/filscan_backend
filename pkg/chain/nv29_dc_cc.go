@@ -5,7 +5,7 @@ import "github.com/shopspring/decimal"
 // QualityTierSplit 把任一时间点全网的（有效算力 qa、原始算力 raw）拆成两档「倍数」口径：
 //
 //	full    = (qa − raw) / 9   满倍率算力：处于 10× 档的等效原始字节
-//	pending = raw − full       待升级算力：未达满倍率的等效原始字节
+//	pending = raw − full       可升级算力：未达满倍率的等效原始字节（SP 可主动升到 10×）
 //	                           （可通过 snap / UpgradeSectorQuality 升级到满倍率）
 //
 // 两个时代同式：NV29（Solstice / FIP-0118）之前 full 恰等于旧的 DC（有验证交易支撑的字节）、

@@ -114,11 +114,11 @@ func (m minersPowerStats) dayPowerStat(ctx context.Context, miners []chain.Smart
 			FaultSectors:          v.FaultSectors,
 		}
 
-		// 满倍率 / 待升级 两档（raw 口径：VdcPower + CcPower = RawBytePower）。
+		// 满倍率 / 可升级 两档（raw 口径：VdcPower + CcPower = RawBytePower）。
 		//
 		// 口径 chain.QualityTierSplit（NV29/FIP-0118 方案 A），两时代同式、不再按 epoch 分叉：
 		//   VdcPower（语义＝满倍率算力）= (QA-raw)/9  ← 处于 10× 档的等效原始字节
-		//   CcPower （语义＝待升级算力）= raw - 满倍率  ← 未达满倍率的等效原始字节
+		//   CcPower （语义＝可升级算力）= raw - 满倍率  ← 未达满倍率的等效原始字节
 		// NV29 前前者恰等于旧 VDC、后者恰等于旧 CC ⇒ 历史不重算、曲线连续。
 		// merger 内部字段名 VdcPower/CcPower 不改（波及面另评），此处只改语义并注明。
 		// 逐 miner 的权威三桶（QA 口径）在 pro.miner_dcs / pro.miner_sectors，由 sector-task

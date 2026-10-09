@@ -153,7 +153,7 @@ func (m MinerBiz) PowerDetail(ctx context.Context, req pro.PowerDetailRequest) (
 				item.QualityPower = vv.QualityAdjPower.Decimal()
 				item.RawPower = vv.RawBytePower.Decimal()
 				// VdcPower / CcPower 是 merger 内部字段名（未改名，波及面另评），
-				// 语义已按 NV29 方案 A 改为「满倍率算力 / 待升级算力」。
+				// 语义已按 NV29 方案 A 改为「满倍率算力 / 可升级算力」。
 				item.FullMultiplierPower = vv.VdcPower.Decimal()
 				item.PendingUpgradePower = vv.CcPower.Decimal()
 				item.SectorSize = vv.SectorSize.Decimal()

@@ -293,7 +293,7 @@ type DCTrendItem struct {
 	// 算力倍数结构（NV29/FIP-0118 方案 A）：口径唯一实现在 chain.QualityTierSplit，
 	// 前端只渲染、不再自行按 (qa−raw)/9 重算，避免两处口径分叉。
 	FullMultiplierPower decimal.Decimal `json:"full_multiplier_power"` // 满倍率算力（10× 档等效原始字节）
-	PendingUpgradePower decimal.Decimal `json:"pending_upgrade_power"` // 待升级算力（未达满倍率的等效原始字节）
+	PendingUpgradePower decimal.Decimal `json:"pending_upgrade_power"` // 可升级算力（未达满倍率的等效原始字节，SP 可主动升到 10×）
 }
 
 // -----------------------区块奖励流向（NV29/FIP-0118）-----------------------//

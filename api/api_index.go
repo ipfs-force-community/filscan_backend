@@ -57,7 +57,7 @@ type TotalIndicators struct {
 	TotalQualityPower decimal.Decimal `json:"total_quality_power"` // 全网有效算力
 	// 全网算力倍数结构（NV29/FIP-0118 方案 A）：口径 chain.QualityTierSplit，两时代同式。
 	FullMultiplierPower decimal.Decimal `json:"full_multiplier_power"` // 满倍率算力（处于 10× 档的等效原始字节）
-	PendingUpgradePower decimal.Decimal `json:"pending_upgrade_power"` // 待升级算力（未达满倍率的等效原始字节）
+	PendingUpgradePower decimal.Decimal `json:"pending_upgrade_power"` // 可升级算力（未达满倍率的等效原始字节，SP 可主动升到 10×）
 	BaseFee             decimal.Decimal `json:"base_fee"`              // 当前基础费率
 	MinerInitialPledge  decimal.Decimal `json:"miner_initial_pledge"`  // 当前扇区质押量
 	PowerIncrease24H    decimal.Decimal `json:"power_increase_24h"`    // 近24h增长算力
