@@ -71,3 +71,42 @@ comment on column chain.reward_stream_recipient_epoch.share is
     '该高度该地址份额之和，Denom=1e18 定点；只出现在已移除流里的地址记 0';
 comment on column chain.reward_stream_recipient_epoch.tombstone is
     '该地址在本高度出现在 ledger.tombstones（已移除流）；展示层 removed_stream = tombstone && share = 0';
+
+-- ===== 属主与授权（幂等；建表后必须执行，勿删） =====
+-- 为什么需要：迁移若以超级用户执行（例如在 PG 主机上 `su postgres -c "psql -f 本文件"`），
+--   新表会归 postgres 且不授任何权限；而同步器用的是应用账号（主网本库为 filscan_admin）。
+--   该账号对这张表连 SELECT 都没有 ⇒ 计算器的写入与 RollBack
+--   （`delete from chain.reward_stream_recipient_epoch where epoch >= $1`）会 permission denied，
+--   回滚永远完不成 ⇒ chain 基础管线原地重试，全站逐高度数据停摆（2026-10-09 实际发生，卡 1.7 小时）。
+-- 做法：从同 schema 的既有表 chain.actor_actions 推导「应用账号」与「只读角色」，
+--   不把环境相关的角色名写死在本文件里；重复执行安全。
+do $$
+declare
+    ref_owner name;
+    ref_acl   aclitem[];
+    ro        text;
+begin
+    select pg_get_userbyid(c.relowner), c.relacl
+      into ref_owner, ref_acl
+      from pg_class c
+      join pg_namespace n on n.oid = c.relnamespace
+     where n.nspname = 'chain' and c.relname = 'actor_actions';
+
+    if ref_owner is null then
+        raise exception '参照表 chain.actor_actions 不存在，无法推导应用账号';
+    end if;
+
+    execute format('alter table chain.reward_stream_recipient_epoch owner to %I', ref_owner);
+    execute format('alter index chain.reward_stream_recipient_epoch_epoch_address_uindex owner to %I', ref_owner);
+    execute format('alter index chain.reward_stream_recipient_epoch_address_epoch_index owner to %I', ref_owner);
+
+    for ro in
+        select distinct pg_get_userbyid(a.grantee)
+          from aclexplode(coalesce(ref_acl, '{}'::aclitem[])) a
+         where a.privilege_type = 'SELECT' and a.grantee <> 0
+    loop
+        if ro <> ref_owner and exists (select 1 from pg_roles where rolname = ro) then
+            execute format('grant select on chain.reward_stream_recipient_epoch to %I', ro);
+        end if;
+    end loop;
+end $$;

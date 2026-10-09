@@ -102,3 +102,38 @@ comment on column chain.reward_stream_recipient_period.first_epoch is
     '本周期内首次观测到该受益方的高度；合并写取 LEAST';
 comment on column chain.reward_stream_recipient_period.last_epoch is
     '本周期内最近一次观测到该受益方的高度；合并写取 GREATEST；RollBack 删除边界列（last_epoch >= gteEpoch）';
+
+-- ===== 属主与授权（幂等；建表后必须执行，勿删） =====
+-- 与 migration/37 同因：迁移若以超级用户执行，表会归 postgres 且零授权，
+--   应用账号写入/RollBack 时 permission denied，回滚无法完成 ⇒ 基础管线原地重试、全站停摆。
+--   这里同样从同 schema 的既有表 chain.actor_actions 推导应用账号与只读角色；重复执行安全。
+do $$
+declare
+    ref_owner name;
+    ref_acl   aclitem[];
+    ro        text;
+begin
+    select pg_get_userbyid(c.relowner), c.relacl
+      into ref_owner, ref_acl
+      from pg_class c
+      join pg_namespace n on n.oid = c.relnamespace
+     where n.nspname = 'chain' and c.relname = 'actor_actions';
+
+    if ref_owner is null then
+        raise exception '参照表 chain.actor_actions 不存在，无法推导应用账号';
+    end if;
+
+    execute format('alter table chain.reward_stream_recipient_period owner to %I', ref_owner);
+    execute format('alter index chain.reward_stream_recipient_period_address_period_uindex owner to %I', ref_owner);
+    execute format('alter index chain.reward_stream_recipient_period_period_start_index owner to %I', ref_owner);
+
+    for ro in
+        select distinct pg_get_userbyid(a.grantee)
+          from aclexplode(coalesce(ref_acl, '{}'::aclitem[])) a
+         where a.privilege_type = 'SELECT' and a.grantee <> 0
+    loop
+        if ro <> ref_owner and exists (select 1 from pg_roles where rolname = ro) then
+            execute format('grant select on chain.reward_stream_recipient_period to %I', ro);
+        end if;
+    end loop;
+end $$;
