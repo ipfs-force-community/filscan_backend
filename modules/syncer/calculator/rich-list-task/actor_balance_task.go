@@ -47,31 +47,50 @@ func (a ActorBalanceTask) Calc(ctx *syncer.Context) (err error) {
 		return
 	}
 	
+	// currentDay = 今天（本机时钟，北京时间）的起始高度。
+	// miner 系子同步器按设计落后链头约 1000 高度（≈8 小时），游标会「越过」而非「恰好等于」
+	// 当天边界（旧写法 `currentDay == ctx.Epoch()` 因此永远不成立、从不写入，已核实）。
+	// 故判据改为「游标已走到或越过当天边界」。
 	currentDay := chain.CurrentEpoch().CurrentDay()
-	if currentDay == ctx.Epoch() {
-		filters := types.Filters{
-			Index: 0,
-			Limit: 1000,
-			Start: &currentDay,
-		}
-		var richList *londobell.RichList
-		richList, err = a.getRichList(ctx, filters)
-		if err != nil {
-			return err
-		}
-		if richList == nil || richList.TotalCount == 0 {
-			err = mix.Warnf("获取富豪榜为空")
-			return
-		}
-		var actorBalanceList []*actor.RichActor
-		actorBalanceList, err = a.toActorsBalance(richList, currentDay)
-		if err != nil {
-			return err
-		}
-		err = a.save(ctx.Context(), actorBalanceList)
-		if err != nil {
-			return err
-		}
+	if ctx.Epoch() < currentDay {
+		// 游标还没到当天边界，等它追上。
+		return
+	}
+	
+	// 幂等：越过边界后，当天剩余的所有高度都会重复进到这里，而 chain.rich_actors 在
+	// (epoch, actor_id) 上有唯一索引、重复写会硬报错。因此写入前必须回库确认「今天这一期
+	// 还没写过」——不能只用内存标记（进程重启 / 离线回放 / 回滚后重进都会绕过内存态）。
+	// 回滚会删掉冲突高度起的行，届时这里重新查到「不存在」并补写，正是期望的补写行为。
+	exists, err := a.actorBalanceRepo.ExistsActorsBalance(ctx.Context(), currentDay)
+	if err != nil {
+		return err
+	}
+	if exists {
+		return
+	}
+	
+	filters := types.Filters{
+		Index: 0,
+		Limit: 1000,
+		Start: &currentDay,
+	}
+	var richList *londobell.RichList
+	richList, err = a.getRichList(ctx, filters)
+	if err != nil {
+		return err
+	}
+	if richList == nil || richList.TotalCount == 0 {
+		err = mix.Warnf("获取富豪榜为空")
+		return
+	}
+	var actorBalanceList []*actor.RichActor
+	actorBalanceList, err = a.toActorsBalance(richList, currentDay)
+	if err != nil {
+		return err
+	}
+	err = a.save(ctx.Context(), actorBalanceList)
+	if err != nil {
+		return err
 	}
 	return
 }

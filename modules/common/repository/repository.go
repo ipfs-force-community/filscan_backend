@@ -243,6 +243,10 @@ type ActorBalanceTaskRepo interface {
 	GetRichAccountRank(ctx context.Context, query filscan.PagingQuery) (result *bo.RichAccountRankList, err error)
 	SaveActorsBalance(ctx context.Context, actorsBalance []*actor.RichActor) (err error)
 	DeleteActorsBalance(ctx context.Context, gteEpoch chain.Epoch) (err error)
+	// ExistsActorsBalance 判断 chain.rich_actors 中是否已存在 epoch 对应的一期富豪榜快照。
+	// 供 rich-list-task 做幂等补写：游标越过当天边界后，(epoch, actor_id) 上有唯一索引，
+	// 重复写会硬报错，因此必须先查「本期是否已写入」再决定是否取榜保存。
+	ExistsActorsBalance(ctx context.Context, epoch chain.Epoch) (exists bool, err error)
 }
 
 type ActorTypeTaskRepo interface {

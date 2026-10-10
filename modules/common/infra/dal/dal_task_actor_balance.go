@@ -104,3 +104,21 @@ func (a ActorBalanceTaskDal) DeleteActorsBalance(ctx context.Context, gteEpoch c
 	err = tx.Exec(`delete from chain.rich_actors where epoch >= ?`, gteEpoch.Int64()).Error
 	return
 }
+
+// ExistsActorsBalance 查询 chain.rich_actors 是否已有 epoch 的一期快照。
+// 供 rich-list-task 幂等补写使用：不能靠内存标记（进程重启/回放/多高度都会重进），
+// 必须回库查「真实存不存在」。与写入走同一上下文事务（a.Exec 取 ctx 里的 tx），
+// 因此「先查后写」在同一事务内自洽。
+func (a ActorBalanceTaskDal) ExistsActorsBalance(ctx context.Context, epoch chain.Epoch) (exists bool, err error) {
+	var count int64
+	err = a.Exec(ctx, func(tx *gorm.DB) error {
+		return tx.Model(&po.RichActor{}).
+			Where("epoch = ?", epoch.Int64()).
+			Count(&count).Error
+	})
+	if err != nil {
+		return
+	}
+	exists = count > 0
+	return
+}
