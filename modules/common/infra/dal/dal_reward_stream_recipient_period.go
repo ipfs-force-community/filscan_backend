@@ -99,6 +99,24 @@ func (s RewardStreamRecipientPeriodDal) ListRewardStreamRecipientPeriodsByPeriod
 	return
 }
 
+// ListRewardStreamRecipientPeriodsUpTo 取「周期起点 <= periodStart」的全部受益方归集行，
+// 按 (address asc, period_start_epoch asc) 定序。语义 = 该周期及**此前所有周期**：归集表只增不减，
+// period_start_epoch 不会超过链头周期，故等价于「全部周期的行」。
+//
+// 与 ListRewardStreamRecipientPeriodsByPeriodStart 的区别：后者只取**当前一个周期**，
+// 用它判定「离场者」会漏掉在更早周期就已离场、当前周期无行的地址（2026-10-13 cali 实测 t0200442）。
+// 提示：本表跨周期会按 (address, period) 增长，展示层只做内存聚合，**不得**对每个地址再逐行查库（禁 N+1）。
+func (s RewardStreamRecipientPeriodDal) ListRewardStreamRecipientPeriodsUpTo(ctx context.Context, periodStart chain.Epoch) (items []*po.RewardStreamRecipientPeriod, err error) {
+	tx, err := s.DB(ctx)
+	if err != nil {
+		return
+	}
+	err = tx.Where("period_start_epoch <= ?", periodStart.Int64()).
+		Order("address asc, period_start_epoch asc").
+		Find(&items).Error
+	return
+}
+
 // EarliestRewardStreamRecipientPeriodEpoch 全表 MIN(first_epoch)：累计已收「自何高度起有效」。
 // 表为空（无任何归集行）⇒ found=false、epoch=0。用 *int64 承接 NULL，避免把「无数据」误当 0。
 func (s RewardStreamRecipientPeriodDal) EarliestRewardStreamRecipientPeriodEpoch(ctx context.Context) (epoch chain.Epoch, found bool, err error) {

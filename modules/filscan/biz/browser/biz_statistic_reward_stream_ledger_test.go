@@ -43,6 +43,10 @@ const caliLedgerJSON = `{
 
 // fakeRewardStreamRecipientSnapshot 假「本周期受益方来源」仓储（快照 + 归集两路），
 // 记录调用次数与查询区间供降级/未激活/累计已收 断言。
+//
+// 归集两路（ListRewardStreamRecipientPeriodsByPeriodStart / ...UpTo）都从 periodRows 里
+// **按 period_start_epoch 过滤**返回，忠实模拟 DAL 的 WHERE 谓词（= ? 对 <= ?）：设一组跨周期行即可
+// 同时演练「本周期探针」（只命中本周期）与「离场判定」（命中全部周期≤起点），无需两份样本。
 type fakeRewardStreamRecipientSnapshot struct {
 	// 快照来源（按高度）。
 	rows  []*po.RewardStreamRecipientEpoch
@@ -50,11 +54,18 @@ type fakeRewardStreamRecipientSnapshot struct {
 	calls int
 	rng   chain.LCRCRange
 
-	// 归集来源（按周期）：本周期行（离场判定 + 累计探针）。
+	// 快照来源（每地址全局最大 epoch 一行）的调用足迹：latestMax 记录查询上界（= 当前高度）。
+	latestCalls int
+	latestMax   chain.Epoch
+
+	// 归集来源（按周期）：periodRows 是全量样本，两个读方法各自按 periodStart 过滤。
 	periodRows  []*po.RewardStreamRecipientPeriod
 	periodErr   error
 	periodCalls int
 	periodStart chain.Epoch
+	// 归集来源：跨全部周期（离场判定）的调用足迹。
+	periodUpToCalls int
+	periodUpToStart chain.Epoch
 	// 归集来源：按地址批量取（累计 SUM）。
 	periodByAddrRows  []*po.RewardStreamRecipientPeriod
 	periodByAddrErr   error
@@ -73,10 +84,67 @@ func (f *fakeRewardStreamRecipientSnapshot) ListRewardStreamRecipientsByEpochRan
 	return f.rows, f.err
 }
 
+// ListLatestRewardStreamRecipientEpochPerAddress 忠实模拟 DAL 的 DISTINCT ON (address) ... ORDER BY address asc, epoch desc：
+// 每个地址只回 epoch 最大、且 <= maxEpoch 的一行，**与 rows 的排列顺序无关**（用来证明上层不依赖行序、只认 epoch）。
+func (f *fakeRewardStreamRecipientSnapshot) ListLatestRewardStreamRecipientEpochPerAddress(_ context.Context, maxEpoch chain.Epoch) ([]*po.RewardStreamRecipientEpoch, error) {
+	f.calls++
+	f.latestCalls++
+	f.latestMax = maxEpoch
+	if f.err != nil {
+		return nil, f.err
+	}
+	best := make(map[string]*po.RewardStreamRecipientEpoch, len(f.rows))
+	order := make([]string, 0, len(f.rows))
+	for _, r := range f.rows {
+		if r == nil || r.Epoch > maxEpoch.Int64() {
+			continue
+		}
+		cur, ok := best[r.Address]
+		if !ok {
+			best[r.Address] = r
+			order = append(order, r.Address)
+			continue
+		}
+		if r.Epoch > cur.Epoch {
+			best[r.Address] = r
+		}
+	}
+	out := make([]*po.RewardStreamRecipientEpoch, 0, len(order))
+	for _, addr := range order {
+		out = append(out, best[addr])
+	}
+	return out, nil
+}
+
 func (f *fakeRewardStreamRecipientSnapshot) ListRewardStreamRecipientPeriodsByPeriodStart(_ context.Context, periodStart chain.Epoch) ([]*po.RewardStreamRecipientPeriod, error) {
 	f.periodCalls++
 	f.periodStart = periodStart
-	return f.periodRows, f.periodErr
+	if f.periodErr != nil {
+		return nil, f.periodErr
+	}
+	out := make([]*po.RewardStreamRecipientPeriod, 0, len(f.periodRows))
+	for _, r := range f.periodRows {
+		if r != nil && r.PeriodStartEpoch == periodStart.Int64() {
+			out = append(out, r)
+		}
+	}
+	return out, nil
+}
+
+// ListRewardStreamRecipientPeriodsUpTo 忠实模拟 DAL 的 WHERE period_start_epoch <= ?（跨全部周期）。
+func (f *fakeRewardStreamRecipientSnapshot) ListRewardStreamRecipientPeriodsUpTo(_ context.Context, periodStart chain.Epoch) ([]*po.RewardStreamRecipientPeriod, error) {
+	f.periodUpToCalls++
+	f.periodUpToStart = periodStart
+	if f.periodErr != nil {
+		return nil, f.periodErr
+	}
+	out := make([]*po.RewardStreamRecipientPeriod, 0, len(f.periodRows))
+	for _, r := range f.periodRows {
+		if r != nil && r.PeriodStartEpoch <= periodStart.Int64() {
+			out = append(out, r)
+		}
+	}
+	return out, nil
 }
 
 func (f *fakeRewardStreamRecipientSnapshot) ListRewardStreamRecipientPeriodsByAddresses(_ context.Context, addresses []string) ([]*po.RewardStreamRecipientPeriod, error) {
@@ -408,9 +476,14 @@ func TestRewardStreamLedgerDepartedAppended(t *testing.T) {
 	if snap.calls != 1 {
 		t.Fatalf("nv29 已激活且已排期时应查 1 次快照，实际 %d", snap.calls)
 	}
-	if snap.rng.GteBegin.Int64() != wantStart || snap.rng.LteEnd.Int64() != cur {
-		t.Fatalf("快照查询区间应为 [周期起点 %d, 当前高度 %d]，得到 [%d, %d]",
-			wantStart, cur, snap.rng.GteBegin.Int64(), snap.rng.LteEnd.Int64())
+	// 快照来源改为「每地址全局最后一行」：查询上界 = 当前高度（不再有周期起点下界）。
+	if snap.latestCalls != 1 || snap.latestMax.Int64() != cur {
+		t.Fatalf("快照查询应只调 1 次且上限为当前高度 %d（全局每地址取最后一行），得到 calls=%d max=%d",
+			cur, snap.latestCalls, snap.latestMax.Int64())
+	}
+	// 归集来源仍按「全部周期」查、起点 = 本周期起点（不受本次快照改动影响）。
+	if snap.periodUpToStart.Int64() != wantStart {
+		t.Fatalf("归集来源查询起点应为本周期起点 %d，得到 %d", wantStart, snap.periodUpToStart.Int64())
 	}
 	if len(resp.Recipients) != 2 {
 		t.Fatalf("应返回 2 个受益方（1 活跃 + 1 离场），得到 %d", len(resp.Recipients))
@@ -839,5 +912,241 @@ func TestRewardStreamLedgerClaimedTotalDiffersFromCurrentPeriod(t *testing.T) {
 	}
 	if row.ClaimedTotal.Equal(row.ClaimedPeriod) {
 		t.Fatal("累计(claimed_total) 不应等于当期(claimed_period)")
+	}
+}
+
+// ⑦【回归】只在**更早周期**有归集行、当前链上已不在的地址，仍必须以 departed=true 出现。
+// 放宽「离场者」来源到全部周期前，代码只查本周期 ⇒ 这类地址被漏掉（2026-10-13 cali 实测 t0200442
+// 在上一个周期离场）。本用例钉死该行为：离场判定必须走 ListRewardStreamRecipientPeriodsUpTo（跨全部周期）。
+func TestRewardStreamLedgerDepartedFromEarlierPeriod(t *testing.T) {
+	const solstice = int64(6_000_000)
+	periodLen := int64(buildconstants.SolsticeEpochsPerQuarter)
+	cur := solstice + 2*periodLen + 5
+	start := solstice + 2*periodLen
+	prev := start - periodLen // 更早的周期
+
+	periodRows := []*po.RewardStreamRecipientPeriod{
+		// 本周期行：只是一个活跃地址（让「本周期是否已归集」探针非空、不触发未知降级）。
+		periodRow("t0199897", start, cur-1, cur-1, "0", "1000000000000000000"),
+		// 离场者：**只在更早周期**有归集行，当前链上已不在（departedActiveLedger 里没有它）。
+		periodRow("t0200442", prev, prev+1, prev+9, "42000000000000000000", "737500000000000000"),
+	}
+	snap := &fakeRewardStreamRecipientSnapshot{
+		rows:             nil, // 快照表已修剪 / 为空：证明离开判定**只靠归集表**也能成立
+		periodRows:       periodRows,
+		periodByAddrRows: periodRows,
+		earliest:         chain.Epoch(prev + 1), earliestFound: true,
+	}
+	biz := NewStatisticRewardStreamLedgerBiz(&fakeRewardStreamsSyncer{epoch: cur}, &fakeRewardStreamLedgerSource{ledger: departedActiveLedger(cur)}, snap, snap)
+	biz.solsticeEpoch = solstice
+
+	resp, err := biz.RewardStreamLedger(context.Background(), filscan.RewardStreamLedgerRequest{})
+	if err != nil {
+		t.Fatalf("不应报错: %s", err)
+	}
+	// 离场判定必须走「全部周期」那条查询（UpTo），起点=本周期起点、只调 1 次（禁 N+1）。
+	if snap.periodUpToCalls != 1 || snap.periodUpToStart.Int64() != start {
+		t.Fatalf("离场判定应调用 ListRewardStreamRecipientPeriodsUpTo(起点 %d) 1 次，得到 calls=%d start=%d",
+			start, snap.periodUpToCalls, snap.periodUpToStart.Int64())
+	}
+	if len(resp.Recipients) != 2 {
+		t.Fatalf("应返回 2 行（1 活跃 + 1 更早周期离场），得到 %d", len(resp.Recipients))
+	}
+	if resp.Recipients[0].Address != "t0199897" || resp.Recipients[0].Departed {
+		t.Fatalf("第 1 行应为活跃 t0199897，得到 %s/departed=%v", resp.Recipients[0].Address, resp.Recipients[0].Departed)
+	}
+	d := resp.Recipients[1]
+	if d.Address != "t0200442" || !d.Departed {
+		t.Fatalf("第 2 行应为更早周期离场者 t0200442/departed=true，得到 %s/departed=%v", d.Address, d.Departed)
+	}
+	// 离场行口径：当前无份额 ⇒ share_pct=0.00、当期应收 0；pending 恒等于 carried（拆列不变量）。
+	if d.SharePct != "0.00" || !d.PendingClaimCurrent.IsZero() {
+		t.Fatalf("离场行应为 share_pct=0.00 / pending_claim_current=0，得到 %s/%s", d.SharePct, d.PendingClaimCurrent)
+	}
+	if !d.PendingClaim.Equal(d.PendingClaimCarried) {
+		t.Fatalf("离场行 pending_claim 应等于 carried，得到 %s vs %s", d.PendingClaim, d.PendingClaimCarried)
+	}
+	// left_epoch 取该地址所有归集行的 last_epoch 最大值。
+	if d.LeftEpoch != prev+9 {
+		t.Fatalf("left_epoch 应取归集行 last_epoch=%d，得到 %d", prev+9, d.LeftEpoch)
+	}
+	// last_share_pct / claimed_period 退回归集行（快照为空）。
+	if d.LastSharePct != "73.75" {
+		t.Fatalf("last_share_pct 应取归集行 last_share（73.75），得到 %s", d.LastSharePct)
+	}
+	if !d.ClaimedPeriod.Equal(decimal.RequireFromString("42000000000000000000")) {
+		t.Fatalf("claimed_period 应取归集行 claimed_in_period=42e18，得到 %s", d.ClaimedPeriod)
+	}
+	// 累计已收含更早周期行（归集 SUM）：证明更早周期的数据确实被纳入排行。
+	if d.ClaimedTotal == nil || !d.ClaimedTotal.Equal(decimal.RequireFromString("42000000000000000000")) {
+		t.Fatalf("累计已收应含更早周期行 42e18，得到 %v", d.ClaimedTotal)
+	}
+}
+
+// ⑧【回归】同一地址在归集表里有**多个周期**行时，last_share_pct / claimed_period 必须取「周期起点最大」
+// 的那一行 —— 不随行在切片里的顺序变化（故意把较晚周期行放前面，仍要选中它）。
+func TestRewardStreamLedgerDepartedPeriodRowPicksLatestPeriod(t *testing.T) {
+	const solstice = int64(6_000_000)
+	periodLen := int64(buildconstants.SolsticeEpochsPerQuarter)
+	cur := solstice + 3*periodLen + 5
+	start := solstice + 3*periodLen
+	prev1 := start - periodLen
+	prev2 := start - 2*periodLen
+
+	// 故意把「最近周期」的行放在**前面**：若实现任取遍历到的最后一行，就会取到较旧值（错误）。
+	rows := []*po.RewardStreamRecipientPeriod{
+		periodRow("t0300111", start, start+1, start+3, "42000000000000000000", "737500000000000000"), // 最近周期
+		periodRow("t0300111", prev1, prev1+1, prev1+8, "11000000000000000000", "100000000000000000"), // 更早
+		periodRow("t0300111", prev2, prev2+2, prev2+7, "5000000000000000000", "500000000000000000"),  //  最早
+	}
+	snap := &fakeRewardStreamRecipientSnapshot{
+		periodRows:       rows,
+		periodByAddrRows: rows,
+		earliest:         chain.Epoch(prev2 + 2), earliestFound: true,
+	}
+	biz := NewStatisticRewardStreamLedgerBiz(&fakeRewardStreamsSyncer{epoch: cur}, &fakeRewardStreamLedgerSource{ledger: departedActiveLedger(cur)}, snap, snap)
+	biz.solsticeEpoch = solstice
+
+	resp, err := biz.RewardStreamLedger(context.Background(), filscan.RewardStreamLedgerRequest{})
+	if err != nil {
+		t.Fatalf("不应报错: %s", err)
+	}
+	if len(resp.Recipients) != 2 {
+		t.Fatalf("应返回 2 行（1 活跃 + 1 离场），得到 %d", len(resp.Recipients))
+	}
+	d := resp.Recipients[1]
+	if d.Address != "t0300111" || !d.Departed {
+		t.Fatalf("第 2 行应为离场 t0300111，得到 %s/departed=%v", d.Address, d.Departed)
+	}
+	if d.LastSharePct != "73.75" {
+		t.Fatalf("last_share_pct 应取周期起点最大那一行（73.75），得到 %s", d.LastSharePct)
+	}
+	if !d.ClaimedPeriod.Equal(decimal.RequireFromString("42000000000000000000")) {
+		t.Fatalf("claimed_period 应取周期起点最大那一行（42e18），得到 %s", d.ClaimedPeriod)
+	}
+	// left_epoch 取所有行 last_epoch 的最大值 = start+3。
+	if d.LeftEpoch != start+3 {
+		t.Fatalf("left_epoch 应取所有归集行 last_epoch 最大值 %d，得到 %d", start+3, d.LeftEpoch)
+	}
+	// 累计已收 = 三行 SUM = 11e18 + 42e18 + 5e18 = 58e18（跨周期求和）。
+	wantTotal := decimal.RequireFromString("58000000000000000000")
+	if d.ClaimedTotal == nil || !d.ClaimedTotal.Equal(wantTotal) {
+		t.Fatalf("累计已收应为三周期之和 58e18，得到 %v", d.ClaimedTotal)
+	}
+	// 不变量：pending == current + carried。
+	if !d.PendingClaimCurrent.Add(d.PendingClaimCarried).Equal(d.PendingClaim) {
+		t.Fatalf("拆列不守恒: %s + %s != %s", d.PendingClaimCurrent, d.PendingClaimCarried, d.PendingClaim)
+	}
+}
+
+// ⑨【快照来源改为「每地址全局最后一行」】某地址**只在快照表**里有行、且行都在更早周期，
+// 当前链上不在、归集表也无它的行（tombstone 遗留欠款收款人按设计不进退集表）——
+// 必须仍以 departed=true 出现（2026-10-13 cali 实测 t0200206：快照行在 epoch 4139255..4149038，
+// 都比本周期起点早）。旧实现只查 [本周期起点, 当前高度] 会把它漏掉，页面就少一行。
+func TestRewardStreamLedgerDepartedFromSnapshotEarlierPeriod(t *testing.T) {
+	const solstice = int64(6_000_000)
+	periodLen := int64(buildconstants.SolsticeEpochsPerQuarter)
+	cur := solstice + 2*periodLen + 5
+	start := solstice + 2*periodLen
+
+	snap := &fakeRewardStreamRecipientSnapshot{
+		// 同一个地址两行、都 < 本周期起点 start（更早周期）：证明「全局最大 epoch」而非「本周期内」。
+		rows: []*po.RewardStreamRecipientEpoch{
+			{Epoch: start - 1000, Address: "t0200206", Share: decimal.RequireFromString("100000000000000000"), Payable: decimal.RequireFromString("111000000000000000000")},
+			{Epoch: start - 500, Address: "t0200206", Share: decimal.RequireFromString("737500000000000000"), Payable: decimal.RequireFromString("4062440000000000000000"), ClaimedPeriod: decimal.RequireFromString("42000000000000000000")},
+		},
+		// 归集表**完全无**该地址的行（tombstone 遗留欠款收款人不进退集表）。
+		periodRows: nil,
+	}
+	biz := NewStatisticRewardStreamLedgerBiz(&fakeRewardStreamsSyncer{epoch: cur}, &fakeRewardStreamLedgerSource{ledger: departedActiveLedger(cur)}, snap, snap)
+	biz.solsticeEpoch = solstice
+
+	resp, err := biz.RewardStreamLedger(context.Background(), filscan.RewardStreamLedgerRequest{})
+	if err != nil {
+		t.Fatalf("不应报错: %s", err)
+	}
+	// 快照查询必须是「每地址全局最后一行」这一条（上限=当前高度、单次）。
+	if snap.latestCalls != 1 || snap.latestMax.Int64() != cur {
+		t.Fatalf("快照来源应改为「每地址全局最后一行」并只调 1 次，得到 calls=%d max=%d", snap.latestCalls, snap.latestMax.Int64())
+	}
+	if len(resp.Recipients) != 2 {
+		t.Fatalf("应返回 2 行（1 活跃 + 1 仅在更早周期快照里的离场者），得到 %d", len(resp.Recipients))
+	}
+	if resp.Recipients[0].Address != "t0199897" || resp.Recipients[0].Departed {
+		t.Fatalf("第 1 行应为活跃 t0199897，得到 %s/departed=%v", resp.Recipients[0].Address, resp.Recipients[0].Departed)
+	}
+	d := resp.Recipients[1]
+	if d.Address != "t0200206" || !d.Departed {
+		t.Fatalf("第 2 行应为仅在快照表/更早周期的离场者 t0200206/departed=true，得到 %s/departed=%v", d.Address, d.Departed)
+	}
+	// 离场行口径：当前无份额 ⇒ share_pct=0.00、当期应收 0；pending 恒等于 carried（拆列不变量）。
+	if d.SharePct != "0.00" || !d.PendingClaimCurrent.IsZero() {
+		t.Fatalf("离场行应为 share_pct=0.00 / pending_claim_current=0，得到 %s/%s", d.SharePct, d.PendingClaimCurrent)
+	}
+	// left_epoch 取该地址快照行的最大 epoch（start-500）。若实现误取「本周期内」则此地址根本不出行。
+	if d.LeftEpoch != start-500 {
+		t.Fatalf("left_epoch 应取该地址全局最大快照 epoch=%d，得到 %d", start-500, d.LeftEpoch)
+	}
+	// pending_claim_carried 取该地址最后一行快照的 Payable。
+	if !d.PendingClaimCarried.Equal(decimal.RequireFromString("4062440000000000000000")) {
+		t.Fatalf("pending_claim_carried 应取最后一行快照的 Payable 4062.44 FIL，得到 %s", d.PendingClaimCarried)
+	}
+	if !d.PendingClaim.Equal(d.PendingClaimCarried) {
+		t.Fatalf("离场行 pending_claim 应等于 carried，得到 %s vs %s", d.PendingClaim, d.PendingClaimCarried)
+	}
+	// last_share_pct / claimed_period 取该地址最大 epoch 那一行快照（73.75% / 42e18）。
+	if d.LastSharePct != "73.75" {
+		t.Fatalf("last_share_pct 应取最大 epoch 快照行（73.75），得到 %s", d.LastSharePct)
+	}
+	if !d.ClaimedPeriod.Equal(decimal.RequireFromString("42000000000000000000")) {
+		t.Fatalf("claimed_period 应取最大 epoch 快照行（42e18），得到 %s", d.ClaimedPeriod)
+	}
+}
+
+// ⑩【防回归】快照表里同一地址**多行**（早的 + 晚的）⇒ 只能取 epoch 最大的那行。
+// 故意把「晚的」那一行放在切片**前面**：若实现对行序敏感（任取首行 / 末行）就会取错（旧值是 30% / 111e18）。
+func TestRewardStreamLedgerDepartedSnapshotPicksLatestEpoch(t *testing.T) {
+	const solstice = int64(6_000_000)
+	periodLen := int64(buildconstants.SolsticeEpochsPerQuarter)
+	cur := solstice + 2*periodLen + 5
+
+	snap := &fakeRewardStreamRecipientSnapshot{
+		rows: []*po.RewardStreamRecipientEpoch{
+			// 晚的（epoch 最大）故意放前面。
+			{Epoch: cur - 50, Address: "t0300111", Share: decimal.RequireFromString("737500000000000000"), Payable: decimal.RequireFromString("222000000000000000000"), ClaimedPeriod: decimal.RequireFromString("42000000000000000000")},
+			// 早的（更早周期）。
+			{Epoch: cur - 900, Address: "t0300111", Share: decimal.RequireFromString("300000000000000000"), Payable: decimal.RequireFromString("111000000000000000000")},
+		},
+	}
+	biz := NewStatisticRewardStreamLedgerBiz(&fakeRewardStreamsSyncer{epoch: cur}, &fakeRewardStreamLedgerSource{ledger: departedActiveLedger(cur)}, snap, snap)
+	biz.solsticeEpoch = solstice
+
+	resp, err := biz.RewardStreamLedger(context.Background(), filscan.RewardStreamLedgerRequest{})
+	if err != nil {
+		t.Fatalf("不应报错: %s", err)
+	}
+	if len(resp.Recipients) != 2 {
+		t.Fatalf("应返回 2 行（1 活跃 + 1 离场），得到 %d", len(resp.Recipients))
+	}
+	d := resp.Recipients[1]
+	if d.Address != "t0300111" || !d.Departed {
+		t.Fatalf("第 2 行应为离场 t0300111，得到 %s/departed=%v", d.Address, d.Departed)
+	}
+	// 必须取 epoch 最大那行（晚的）：73.75% / 222e18 / left=cur-50 / claimed=42e18。
+	if d.LastSharePct != "73.75" {
+		t.Fatalf("last_share_pct 应取 epoch 最大行（73.75），得到 %s（错取更早行会是 30.00）", d.LastSharePct)
+	}
+	if !d.PendingClaimCarried.Equal(decimal.RequireFromString("222000000000000000000")) {
+		t.Fatalf("pending_claim_carried 应取 epoch 最大行 Payable 222e18，得到 %s", d.PendingClaimCarried)
+	}
+	if d.LeftEpoch != cur-50 {
+		t.Fatalf("left_epoch 应取 epoch 最大行 %d，得到 %d", cur-50, d.LeftEpoch)
+	}
+	if !d.ClaimedPeriod.Equal(decimal.RequireFromString("42000000000000000000")) {
+		t.Fatalf("claimed_period 应取 epoch 最大行 42e18，得到 %s", d.ClaimedPeriod)
+	}
+	// 不变量。
+	if !d.PendingClaimCurrent.Add(d.PendingClaimCarried).Equal(d.PendingClaim) {
+		t.Fatalf("拆列不守恒: %s + %s != %s", d.PendingClaimCurrent, d.PendingClaimCarried, d.PendingClaim)
 	}
 }

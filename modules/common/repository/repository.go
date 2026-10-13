@@ -97,6 +97,11 @@ type RewardStreamRecipientTask interface {
 	// ListRewardStreamRecipientsByEpochRange 按 epoch 区间取（左闭右闭），
 	// 供展示端聚合「本周期出现过的人」。按 (epoch asc, address asc) 定序返回。
 	ListRewardStreamRecipientsByEpochRange(ctx context.Context, epochs chain.LCRCRange) (items []*po.RewardStreamRecipientEpoch, err error)
+	// ListLatestRewardStreamRecipientEpochPerAddress 对每个受益地址只取 epoch 最大的那一行快照
+	// （全局、限于 epoch <= maxEpoch），**每地址最多一行、单次聚合查询**（DISTINCT ON，禁 N+1）。
+	// 供展示层判定「离场者」：只在快照表、且行都在更早周期的地址（如 tombstone 遗留欠款收款人）
+	// 也必须纳入 —— 只取本周期范围会漏掉它们（2026-10-13 cali 实测 t0200206）。空结果返回 nil。
+	ListLatestRewardStreamRecipientEpochPerAddress(ctx context.Context, maxEpoch chain.Epoch) (items []*po.RewardStreamRecipientEpoch, err error)
 	// DeleteRewardStreamRecipientsGteEpoch 删除 epoch >= gteEpoch 的行（链回滚用）。
 	DeleteRewardStreamRecipientsGteEpoch(ctx context.Context, gteEpoch chain.Epoch) (err error)
 	// DeleteRewardStreamRecipientsLteEpoch 删除 epoch <= lteEpoch 的行（历史清理 / HistoryClear 用）。
@@ -137,6 +142,10 @@ type RewardStreamRecipientPeriodReader interface {
 	// 供展示层判定「本周期出现过的人」（与快照表并集，去重后作为离场判定来源），并作为
 	// 「采集件是否已开始归集本周期」的探针（空 ⇒ 本周期尚无归集，累计未知）。
 	ListRewardStreamRecipientPeriodsByPeriodStart(ctx context.Context, periodStart chain.Epoch) (items []*po.RewardStreamRecipientPeriod, err error)
+	// ListRewardStreamRecipientPeriodsUpTo 取周期起点 <= periodStart 的**全部受益方行**（跨周期，按
+	// address asc, period_start_epoch asc 定序）。归集表只增不减、跨周期保留，是「离场者」判定的可靠
+	// 来源：只取本周期行会漏掉在更早周期就离场、当前周期无行的地址。空结果返回 nil。
+	ListRewardStreamRecipientPeriodsUpTo(ctx context.Context, periodStart chain.Epoch) (items []*po.RewardStreamRecipientPeriod, err error)
 	// EarliestRewardStreamRecipientPeriodEpoch 全表 MIN(first_epoch)：累计已收「自何高度起有效」。
 	// 表为空（无任何归集行）⇒ found=false、epoch=0；否则 found=true 并回传最小观测起点。
 	EarliestRewardStreamRecipientPeriodEpoch(ctx context.Context) (epoch chain.Epoch, found bool, err error)

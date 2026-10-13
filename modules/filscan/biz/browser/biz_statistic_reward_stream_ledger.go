@@ -37,15 +37,20 @@ type rewardStreamLedgerSource interface {
 // rewardStreamRecipientSnapshotSource 快照来源（按高度 chain.reward_stream_recipient_epoch）只读能力。
 // 由 dal.RewardStreamRecipientDal 满足。快照可被框架 HistoryClear 修剪，仅作「离开前份额」的精度补充。
 type rewardStreamRecipientSnapshotSource interface {
-	ListRewardStreamRecipientsByEpochRange(ctx context.Context, epochs chain.LCRCRange) ([]*po.RewardStreamRecipientEpoch, error)
+	// ListLatestRewardStreamRecipientEpochPerAddress 每个地址取「全部历史最后一行」快照（一次聚合查询，epoch <= maxEpoch）。
+	// 用它而不是「本周期范围」：只在快照表、且行都在更早周期的地址（归集表无其行，如 t0200206）也要能判定离场。
+	ListLatestRewardStreamRecipientEpochPerAddress(ctx context.Context, maxEpoch chain.Epoch) ([]*po.RewardStreamRecipientEpoch, error)
 }
 
 // rewardStreamRecipientPeriodSource 归集来源（按周期 chain.reward_stream_recipient_period）只读能力。
 // 由 dal.RewardStreamRecipientPeriodDal 满足。归集表只增不减、跨周期保留，是「累计已收」与
-// 「本周期离场」的可靠来源（快照表会被 HistoryClear 按高度修剪，主网周期长达 91 天，靠它判定会漏人）。
+// 「离场者」的可靠来源（快照表会被 HistoryClear 按高度修剪，主网周期长达 91 天，靠它判定会漏人）。
+// 「离场者」判定用**跨全部周期**的 ListRewardStreamRecipientPeriodsUpTo（只看本周期会漏掉更早周期离场的人）；
+// 而「本周期是否已开始归集」的探针仍用 ListRewardStreamRecipientPeriodsByPeriodStart。
 type rewardStreamRecipientPeriodSource interface {
 	ListRewardStreamRecipientPeriodsByAddresses(ctx context.Context, addresses []string) ([]*po.RewardStreamRecipientPeriod, error)
 	ListRewardStreamRecipientPeriodsByPeriodStart(ctx context.Context, periodStart chain.Epoch) ([]*po.RewardStreamRecipientPeriod, error)
+	ListRewardStreamRecipientPeriodsUpTo(ctx context.Context, periodStart chain.Epoch) ([]*po.RewardStreamRecipientPeriod, error)
 	EarliestRewardStreamRecipientPeriodEpoch(ctx context.Context) (epoch chain.Epoch, found bool, err error)
 }
 
@@ -219,17 +224,21 @@ type rewardStreamRecipientAgg struct {
 // 待付拆两列（2026-10-09 用户裁定）：pending_claim_current（当期＝本期应计−本期已提）与
 // pending_claim_carried（跨周期＝链上 Payable，即此前各期已结算未提取的结转）；两列之和恒等于 pending_claim。
 //
-// 本周期离场者（departed，2026-10-10 追加；2026-10-10 数据源改为归集表∪快照表）：本函数只反映**当前链上状态**——
-// 已离场且欠款提完的受益方在链上会彻底消失，单看链头查不到。展示层据此在本函数输出之后补行（appendDepartedRecipients）：
+// 离场者（departed）来源（2026-10-10 追加；2026-10-10 数据源改为归集表∪快照表；2026-10-13 归集来源放宽到全部周期；
+// 2026-10-13 快照来源改为「每地址全局最后一行」）：
+// 本函数只反映**当前链上状态**——已离场且欠款提完的受益方在链上会彻底消失，单看链头查不到。展示层据此在本函数输出之后补行（appendDepartedRecipients）：
 //   - 周期起点 = nv29Epoch + ((curEpoch−nv29Epoch)/periodLen)*periodLen（整除取整；periodLen =
 //     buildconstants.SolsticeEpochsPerQuarter；curEpoch 取链头高度）；
-//   - 数据源＝**归集表本周期行 ∪ 快照表本周期行**（按地址归一去重）：只要在任一来源本周期出现过、
-//     但当前链上状态（活跃份额表 + 已移除流遗留欠款）里**没有**的地址，就算离场。
-//     理由：框架 HistoryClear 的清理窗口未知，而主网周期长达 91 天，快照表可能被修剪；归集表只增不减，是可靠来源。
+//   - 数据源＝**归集表全部周期（≤本周期起点）行 ∪ 快照表每地址全局最后一行**（按地址归一去重）：只要在归集表任意周期、
+//     或快照表任意高度出现过，但当前链上状态（活跃份额表 + 已移除流遗留欠款）里**没有**的地址，就算离场。
+//     理由：框架 HistoryClear 的清理窗口未知，而主网周期长达 91 天，快照表可能被修剪；归集表只增不减、跨周期保留，是可靠来源。
+//     归集来源若只取本周期会漏掉在更早周期就离场、当前周期无行的地址（2026-10-13 cali 实测 t0200442）；
+//     快照来源同理改为**全局**每地址最后一行（单行/地址）：tombstone 遗留欠款收款人按设计不进退集表，只在快照表、行还在更早周期
+//     （2026-10-13 cali 实测 t0200206），只取本周期范围同样会漏；聚合后每地址一行，不放大内存、无 N+1。
 //   - 该行口径：share_pct="0.00"（当前无份额）、pending_claim_current=0、pending_claim_carried=该地址的结转欠款
-//     （优先取快照表 Payable；仅有归集来源时为 0，归集表不存 payable）、pending_claim=carried（保持 pending==current+carried）、
-//     departed=true、left_epoch=两来源 (快照行 epoch / 归集行 last_epoch) 的较大者、
-//     last_share_pct=优先取快照表本周期 epoch 最大行的 Share，快照没有则该地址退回归集表 last_share（同一 sharePercent 口径）；
+//     （优先取快照行 Payable；仅有归集来源时为 0，归集表不存 payable）、pending_claim=carried（保持 pending==current+carried）、
+//     departed=true、left_epoch=两来源 (快照行 epoch / 该地址全部归集行 last_epoch) 的较大者、
+//     last_share_pct=优先取快照行（该地址全局 epoch 最大那一行）的 Share，快照没有则该地址退回归集表**周期起点最大**那一行的 last_share（同一 sharePercent 口径）；
 //   - 排序：活跃行保持原序并一律在前，离场行补在末尾、内部按 pending_claim_carried 降序（相等按地址升序）；
 //   - **任一来源取数失败必须降级**：打 WARN 后该来源按空处理，接口不得 500。
 //
@@ -348,10 +357,18 @@ func periodStartEpoch(nv29Epoch, curEpoch, periodLen int64) int64 {
 	return nv29Epoch + ((curEpoch-nv29Epoch)/periodLen)*periodLen
 }
 
-// appendDepartedRecipients 把「本周期内出现过、但当前链上已查不到」的受益方补进排行末尾并标 departed。
+// appendDepartedRecipients 把「归集表里出现过、但当前链上已查不到」的受益方补进排行末尾并标 departed。
 //
-// 数据源＝归集表本周期行（只增不减、可靠）∪ 快照表本周期行（可被 HistoryClear 修剪，仅作 last_share 补充）；
-// 两表任一查询失败该来源按空处理并打 WARN。
+// 数据源＝归集表**跨全部周期**行（只增不减、可靠）∪ 快照表**每地址全部历史最后一行**（一次聚合查询，
+// 单行/地址；可被 HistoryClear 修剪，取不到该地址即缺失）；两表任一查询失败该来源按空处理并打 WARN。
+//
+// 归集来源放宽到全部周期（用户裁定：按累计口径，早期上线、后来下线的人必须同时存在）：
+// 「离场者」= 归集表**任意周期**出现过的地址中，当前链上状态里没有的那些（含已移除流的遗留欠款收款人）。
+// 只查本周期会漏掉在更早周期就离场、当前周期无行的地址（2026-10-13 cali 实测 t0200442 在上一个周期离场）。
+// 快照来源改为「每个地址取全局 epoch 最大的一行」（不再只取本周期范围）：tombstone 遗留欠款收款人按设计
+// **不进退集表**，像 cali t0200206 只在快照表、且行都在更早周期 —— 只取本周期范围会漏掉它（页面少一行）。
+// 聚合口径下每地址只回一行，既不放大内存也不造成 N+1（单次 DISTINCT ON 查询，见 dal 同名方法）。
+//
 // 触发条件（任一不满足即不查任何来源，保持现有行为）：resp 有效、账本 nv29=true、本网已排期（solsticeEpoch>0）、
 // 来源仓储已注入、当前高度不早于激活高度、周期长度为正。
 //
@@ -369,16 +386,18 @@ func (s StatisticRewardStreamLedgerBiz) appendDepartedRecipients(ctx context.Con
 	}
 	start := periodStartEpoch(s.solsticeEpoch, curEpoch, periodLen)
 
-	// 快照来源：可能被框架 HistoryClear 修剪，取数失败按空处理。
-	snapRows, err := s.snapshot.ListRewardStreamRecipientsByEpochRange(ctx, chain.NewLCRCRange(chain.Epoch(start), chain.Epoch(curEpoch)))
+	// 快照来源：每个地址取「全部历史最后一行」（一次聚合查询，epoch <= curEpoch），可被框架 HistoryClear
+	// 修剪，取数失败按空处理。不再只取本周期范围：只在快照表、且行都在更早周期的地址（归集表无其行，
+	// 如 2026-10-13 cali 实测 t0200206）也必须能被判定离场。
+	snapRows, err := s.snapshot.ListLatestRewardStreamRecipientEpochPerAddress(ctx, chain.Epoch(curEpoch))
 	if err != nil {
-		log.Warnf("reward_stream_ledger: 取本周期(%d..%d)受益方快照失败: %v，快照来源按空处理", start, curEpoch, err)
+		log.Warnf("reward_stream_ledger: 取受益方快照失败(每地址全局最后一行, epoch<=%d): %v，快照来源按空处理", curEpoch, err)
 		snapRows = nil
 	}
-	// 归集来源：只增不减，是「本周期离场」判定的可靠来源，取数失败按空处理。
-	periodRows, err := s.period.ListRewardStreamRecipientPeriodsByPeriodStart(ctx, chain.Epoch(start))
+	// 归集来源：只增不减、跨全部周期，是「离场者」判定的可靠来源，取数失败按空处理。
+	periodRows, err := s.period.ListRewardStreamRecipientPeriodsUpTo(ctx, chain.Epoch(start))
 	if err != nil {
-		log.Warnf("reward_stream_ledger: 取本周期(起点 %d)受益方归集失败: %v，归集来源按空处理", start, err)
+		log.Warnf("reward_stream_ledger: 取周期起点<=%d 受益方归集失败: %v，归集来源按空处理", start, err)
 		periodRows = nil
 	}
 	if len(snapRows) == 0 && len(periodRows) == 0 {
@@ -387,13 +406,16 @@ func (s StatisticRewardStreamLedgerBiz) appendDepartedRecipients(ctx context.Con
 	resp.Recipients = mergeDepartedRecipients(resp.Recipients, snapRows, periodRows, rewardLedgerDenom(ledger))
 }
 
-// mergeDepartedRecipients 把两路来源（快照行 + 归集行）合并后，仅补「本周期出现过、当前排行（含已移除流遗留行）
+// mergeDepartedRecipients 把两路来源（快照行 + 归集行）合并后，仅补「归集表出现过、当前排行（含已移除流遗留行）
 // 里没有」的地址，按地址归一去重。活跃行保持原序并一律在前；离场行补在末尾，内部按跨周期结转(carried)降序
 // （相等按地址升序）。
 //
-// 字段来源：快照口径优先（share/payable/claimed 取本周期内 epoch 最大的快照行）；快照没有该地址时退回归集行
+// 字段来源：快照口径优先（share/payable/claimed 取该地址 epoch 最大的快照行；DAL 已保证每地址至多一行，
+// 这里的「取最大」是防御性判断，兼容任何实现）；快照没有该地址时退回归集行
 // （last_share → last_share_pct、claimed_in_period → claimed_period；结转 payable 无来源记 0）。
-// left_epoch 取两来源可用者的较大值（最近一次被看到的高度）。地址均归一化（SmartAddress）后比较，避免前缀差异造成漏配/重复。
+// 归集来源已放宽到**全部周期**，同一地址可能有多行 ⇒ 回退值必须取「周期起点最大」的那一行
+// （同为最大起点时取 last_epoch 更大者）；left_epoch 取该地址**所有**归集行 last_epoch 与快照行的较大值。
+// 地址均归一化（SmartAddress）后比较，避免前缀差异造成漏配/重复。
 func mergeDepartedRecipients(active []*filscan.RewardStreamRecipient, snapRows []*po.RewardStreamRecipientEpoch, periodRows []*po.RewardStreamRecipientPeriod, denom decimal.Decimal) []*filscan.RewardStreamRecipient {
 	present := make(map[string]struct{}, len(active))
 	for _, r := range active {
@@ -412,6 +434,12 @@ func mergeDepartedRecipients(active []*filscan.RewardStreamRecipient, snapRows [
 		// haveSnap 标记该地址是否已由快照来源给出字段（快照优先），并记住所取快照行的 epoch。
 		haveSnap  bool
 		snapEpoch int64
+
+		// maxPeriodStart / maxPeriodEpoch 记住归集来源里「周期起点最大」的那一行（同起点取 last_epoch 更大者）：
+		// 放宽到全部周期后同一地址会有多行，用它稳定地给 last_share_pct / claimed_period 取回退值，
+		// 使结果不随行的遍历顺序变化（不任取一行、不臆造）。
+		maxPeriodStart int64
+		maxPeriodEpoch int64
 	}
 	acc := make(map[string]*departedRecipient)
 	get := func(addr string) *departedRecipient {
@@ -423,7 +451,7 @@ func mergeDepartedRecipients(active []*filscan.RewardStreamRecipient, snapRows [
 		return d
 	}
 
-	// 快照来源：口径优先（每个地址取本周期内 epoch 最大的那一行）。
+	// 快照来源：口径优先（每个地址取 epoch 最大的那一行；DAL 已保证每地址至多一行）。
 	for _, row := range snapRows {
 		if row == nil {
 			continue
@@ -445,7 +473,8 @@ func mergeDepartedRecipients(active []*filscan.RewardStreamRecipient, snapRows [
 		}
 	}
 
-	// 归集来源：只增不减（快照可能被修剪）。快照已有该地址 ⇒ 只更新 left_epoch；否则用 last_share/claimed_in_period 兜底。
+	// 归集来源：只增不减、跨全部周期（快照可能被修剪）。快照已有该地址 ⇒ 只更新 left_epoch；
+	// 否则用「周期起点最大」的那一行的 last_share/claimed_in_period 兜底。
 	for _, row := range periodRows {
 		if row == nil {
 			continue
@@ -459,9 +488,16 @@ func mergeDepartedRecipients(active []*filscan.RewardStreamRecipient, snapRows [
 			d.leftEpoch = row.LastEpoch
 		}
 		if !d.haveSnap {
-			d.lastShare = sharePercent(row.LastShare, denom)
-			d.claimed = row.ClaimedInPeriod
-			// 归集表不存 payable ⇒ 纯归集来源的离场行 carried 记 0（无来源，不臆造）。
+			// 放宽到全部周期后同一地址会有多行归集：取「周期起点最大」的那一行（同起点取 last_epoch 更大者），
+			// 而不是任取遍历到的最后一行 —— 否则结果是未定义行为。
+			if row.PeriodStartEpoch > d.maxPeriodStart ||
+				(row.PeriodStartEpoch == d.maxPeriodStart && row.LastEpoch > d.maxPeriodEpoch) {
+				d.maxPeriodStart = row.PeriodStartEpoch
+				d.maxPeriodEpoch = row.LastEpoch
+				d.lastShare = sharePercent(row.LastShare, denom)
+				d.claimed = row.ClaimedInPeriod
+				// 归集表不存 payable ⇒ 纯归集来源的离场行 carried 记 0（无来源，不臆造）。
+			}
 		}
 	}
 

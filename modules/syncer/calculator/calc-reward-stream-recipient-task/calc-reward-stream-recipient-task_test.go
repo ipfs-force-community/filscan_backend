@@ -81,6 +81,11 @@ func (r *fakeRecipientRepo) ListRewardStreamRecipientsByEpochRange(context.Conte
 	return nil, nil
 }
 
+// ListLatestRewardStreamRecipientEpochPerAddress 采集侧不读快照（只写），仅为满足接口补桩。
+func (r *fakeRecipientRepo) ListLatestRewardStreamRecipientEpochPerAddress(context.Context, chain.Epoch) ([]*po.RewardStreamRecipientEpoch, error) {
+	return nil, nil
+}
+
 func (r *fakeRecipientRepo) DeleteRewardStreamRecipientsGteEpoch(_ context.Context, gteEpoch chain.Epoch) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
