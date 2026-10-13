@@ -167,6 +167,39 @@ func mustLedger(t *testing.T, raw string) *londobell.RewardStreamLedger {
 	return &l
 }
 
+// recipientByAddress 按地址在排行里取行。排序口径已改为「按累计得到的收益（claimed_total + pending_claim）单一排序」，
+// 取行断言不再依赖位置（旧用例里的「活跃在前 / 离场在后」位置假设在新口径下不成立）。
+func recipientByAddress(t *testing.T, resp *filscan.RewardStreamLedgerResponse, addr string) *filscan.RewardStreamRecipient {
+	t.Helper()
+	for _, r := range resp.Recipients {
+		if r != nil && r.Address == addr {
+			return r
+		}
+	}
+	t.Fatalf("排行中找不到地址 %s，现有行：%v", addr, recipientAddresses(resp))
+	return nil
+}
+
+// recipientAddresses 返回排行的地址序列（供顺序断言与失败信息）。
+func recipientAddresses(resp *filscan.RewardStreamLedgerResponse) []string {
+	out := make([]string, 0, len(resp.Recipients))
+	for _, r := range resp.Recipients {
+		if r != nil {
+			out = append(out, r.Address)
+		}
+	}
+	return out
+}
+
+// assertRecipientOrder 断言排行地址序列恰为 want（顺序敏感）。
+func assertRecipientOrder(t *testing.T, resp *filscan.RewardStreamLedgerResponse, want []string) {
+	t.Helper()
+	got := recipientAddresses(resp)
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Fatalf("排行顺序应为 %v，得到 %v", want, got)
+	}
+}
+
 type fakeRewardStreamLedgerSource struct {
 	ledger *londobell.RewardStreamLedger
 	err    error
@@ -488,13 +521,15 @@ func TestRewardStreamLedgerDepartedAppended(t *testing.T) {
 	if len(resp.Recipients) != 2 {
 		t.Fatalf("应返回 2 个受益方（1 活跃 + 1 离场），得到 %d", len(resp.Recipients))
 	}
-	a := resp.Recipients[0]
-	if a.Address != "t0199897" || a.Departed {
-		t.Fatalf("活跃行应为 t0199897/departed=false，得到 %s/departed=%v", a.Address, a.Departed)
+	// 新口径（整榜按累计收益单一排序）：离场行结转 222e18 > 活跃行待付 1e18 ⇒ 离场者在**前**（不再「活跃一律在前」）。
+	assertRecipientOrder(t, resp, []string{"t0300111", "t0199897"})
+	a := recipientByAddress(t, resp, "t0199897")
+	if a.Departed {
+		t.Fatalf("活跃行 t0199897 应 departed=false，得到 %v", a.Departed)
 	}
-	d := resp.Recipients[1]
-	if d.Address != "t0300111" || !d.Departed {
-		t.Fatalf("离场行应为 t0300111/departed=true，得到 %s/departed=%v", d.Address, d.Departed)
+	d := recipientByAddress(t, resp, "t0300111")
+	if !d.Departed {
+		t.Fatalf("离场行 t0300111 应 departed=true，得到 %v", d.Departed)
 	}
 	if d.SharePct != "0.00" {
 		t.Fatalf("离场行当前无份额 ⇒ share_pct 应 0.00，得到 %s", d.SharePct)
@@ -590,7 +625,8 @@ func TestRewardStreamLedgerDepartedNotQueriedWhenInactive(t *testing.T) {
 	}
 }
 
-// ④两个（含并列）离场地址按 carried 降序（相等按地址升序），且一律排在活跃行之后。
+// ④离场地址（含并列）在**整榜**里按累计收益排序（此样本 claimed_total 全为 nil ⇒ key1 退化为待付=carried）：
+// carried 降序、相等按地址升序；活跃行 t0199897 待付最小 ⇒ 排到所有离场行之后（不再「活跃一律在前」）。
 func TestRewardStreamLedgerDepartedOrderByCarriedDesc(t *testing.T) {
 	const solstice = int64(6_000_000)
 	cur := solstice + 3
@@ -609,18 +645,9 @@ func TestRewardStreamLedgerDepartedOrderByCarriedDesc(t *testing.T) {
 	if len(resp.Recipients) != 4 { // 1 活跃 + 3 离场
 		t.Fatalf("应返回 4 个受益方，得到 %d", len(resp.Recipients))
 	}
-	if resp.Recipients[0].Departed {
-		t.Fatal("活跃行应排在所有离场行之前")
-	}
-	got := make([]string, 0, 3)
-	for _, r := range resp.Recipients[1:] {
-		got = append(got, r.Address)
-	}
-	// carried 降序：t0300201(900) 在前；两个 500 相等 ⇒ 按地址升序 t0300200 < t0300202。
-	want := []string{"t0300201", "t0300200", "t0300202"}
-	if strings.Join(got, ",") != strings.Join(want, ",") {
-		t.Fatalf("离场行顺序应 %v，得到 %v", want, got)
-	}
+	// 整榜单一名次：carried 降序 t0300201(900) > {t0300200,t0300202}(500) > t0199897(1)；
+	// 两个 500 并列 ⇒ key2 claimed_total 也并列 ⇒ 按地址升序 t0300200 < t0300202。
+	assertRecipientOrder(t, resp, []string{"t0300201", "t0300200", "t0300202", "t0199897"})
 }
 
 // ===== 累计已收（claimed_total / claimed_since_epoch）与「本期离场」改以归集表为准 =====
@@ -952,12 +979,14 @@ func TestRewardStreamLedgerDepartedFromEarlierPeriod(t *testing.T) {
 	if len(resp.Recipients) != 2 {
 		t.Fatalf("应返回 2 行（1 活跃 + 1 更早周期离场），得到 %d", len(resp.Recipients))
 	}
-	if resp.Recipients[0].Address != "t0199897" || resp.Recipients[0].Departed {
-		t.Fatalf("第 1 行应为活跃 t0199897，得到 %s/departed=%v", resp.Recipients[0].Address, resp.Recipients[0].Departed)
+	// 新口径：离场者 t0200442 累计（42e18）> 活跃行 t0199897 待付（1e18）⇒ 离场者在**前**。
+	assertRecipientOrder(t, resp, []string{"t0200442", "t0199897"})
+	if active := recipientByAddress(t, resp, "t0199897"); active.Departed {
+		t.Fatalf("t0199897 应仍为活跃行（departed=false），得到 %v", active.Departed)
 	}
-	d := resp.Recipients[1]
-	if d.Address != "t0200442" || !d.Departed {
-		t.Fatalf("第 2 行应为更早周期离场者 t0200442/departed=true，得到 %s/departed=%v", d.Address, d.Departed)
+	d := recipientByAddress(t, resp, "t0200442")
+	if !d.Departed {
+		t.Fatalf("t0200442 应为 departed=true，得到 %v", d.Departed)
 	}
 	// 离场行口径：当前无份额 ⇒ share_pct=0.00、当期应收 0；pending 恒等于 carried（拆列不变量）。
 	if d.SharePct != "0.00" || !d.PendingClaimCurrent.IsZero() {
@@ -1014,9 +1043,11 @@ func TestRewardStreamLedgerDepartedPeriodRowPicksLatestPeriod(t *testing.T) {
 	if len(resp.Recipients) != 2 {
 		t.Fatalf("应返回 2 行（1 活跃 + 1 离场），得到 %d", len(resp.Recipients))
 	}
-	d := resp.Recipients[1]
-	if d.Address != "t0300111" || !d.Departed {
-		t.Fatalf("第 2 行应为离场 t0300111，得到 %s/departed=%v", d.Address, d.Departed)
+	// 新口径：离场者 t0300111 累计（三周期 SUM 58e18）> 活跃行 t0199897 待付（1e18）⇒ 离场者在**前**。
+	assertRecipientOrder(t, resp, []string{"t0300111", "t0199897"})
+	d := recipientByAddress(t, resp, "t0300111")
+	if !d.Departed {
+		t.Fatalf("t0300111 应为 departed=true，得到 %v", d.Departed)
 	}
 	if d.LastSharePct != "73.75" {
 		t.Fatalf("last_share_pct 应取周期起点最大那一行（73.75），得到 %s", d.LastSharePct)
@@ -1072,12 +1103,14 @@ func TestRewardStreamLedgerDepartedFromSnapshotEarlierPeriod(t *testing.T) {
 	if len(resp.Recipients) != 2 {
 		t.Fatalf("应返回 2 行（1 活跃 + 1 仅在更早周期快照里的离场者），得到 %d", len(resp.Recipients))
 	}
-	if resp.Recipients[0].Address != "t0199897" || resp.Recipients[0].Departed {
-		t.Fatalf("第 1 行应为活跃 t0199897，得到 %s/departed=%v", resp.Recipients[0].Address, resp.Recipients[0].Departed)
+	if active := recipientByAddress(t, resp, "t0199897"); active.Departed {
+		t.Fatalf("t0199897 应仍为活跃行（departed=false），得到 %v", active.Departed)
 	}
-	d := resp.Recipients[1]
-	if d.Address != "t0200206" || !d.Departed {
-		t.Fatalf("第 2 行应为仅在快照表/更早周期的离场者 t0200206/departed=true，得到 %s/departed=%v", d.Address, d.Departed)
+	// 新口径：离场者 t0200206 累计（结转 4062.44e18）> 活跃行 t0199897 待付（1e18）⇒ 离场者在**前**。
+	assertRecipientOrder(t, resp, []string{"t0200206", "t0199897"})
+	d := recipientByAddress(t, resp, "t0200206")
+	if !d.Departed {
+		t.Fatalf("t0200206 应为 departed=true，得到 %v", d.Departed)
 	}
 	// 离场行口径：当前无份额 ⇒ share_pct=0.00、当期应收 0；pending 恒等于 carried（拆列不变量）。
 	if d.SharePct != "0.00" || !d.PendingClaimCurrent.IsZero() {
@@ -1128,9 +1161,11 @@ func TestRewardStreamLedgerDepartedSnapshotPicksLatestEpoch(t *testing.T) {
 	if len(resp.Recipients) != 2 {
 		t.Fatalf("应返回 2 行（1 活跃 + 1 离场），得到 %d", len(resp.Recipients))
 	}
-	d := resp.Recipients[1]
-	if d.Address != "t0300111" || !d.Departed {
-		t.Fatalf("第 2 行应为离场 t0300111，得到 %s/departed=%v", d.Address, d.Departed)
+	// 新口径：离场者 t0300111 累计（结转 222e18）> 活跃行 t0199897 待付（1e18）⇒ 离场者在**前**。
+	assertRecipientOrder(t, resp, []string{"t0300111", "t0199897"})
+	d := recipientByAddress(t, resp, "t0300111")
+	if !d.Departed {
+		t.Fatalf("t0300111 应为 departed=true，得到 %v", d.Departed)
 	}
 	// 必须取 epoch 最大那行（晚的）：73.75% / 222e18 / left=cur-50 / claimed=42e18。
 	if d.LastSharePct != "73.75" {
@@ -1148,5 +1183,284 @@ func TestRewardStreamLedgerDepartedSnapshotPicksLatestEpoch(t *testing.T) {
 	// 不变量。
 	if !d.PendingClaimCurrent.Add(d.PendingClaimCarried).Equal(d.PendingClaim) {
 		t.Fatalf("拆列不守恒: %s + %s != %s", d.PendingClaimCurrent, d.PendingClaimCarried, d.PendingClaim)
+	}
+}
+
+// ===== 整榜单一名次：按「累积得到的收益」(claimed_total + pending_claim) 降序（产品口径，2026-10-13）=====
+//
+// 口径：不再「活跃在前 + 离场附后」两段，整张榜按累计从奖励流获得的总额排一条名次 ——
+// 排序键 = claimed_total（累计已收）+ pending_claim（累计应收），降序；并列按 claimed_total 降序、再按 address 升序。
+
+// 【新用例①】离场者凭**累计得到的收益**排到低累计活跃者之前（不再「活跃一律在前」），且 departed 仍为 true。
+// 活跃 A=t0199897：累计 5e18 + 应收 1e18 = 6e18；离场 B=t0400111：累计 5000e18 + 应收 0 = 5000e18 ⇒ B 在前。
+func TestRewardStreamLedgerDepartedRanksAboveLowActiveByCumulative(t *testing.T) {
+	const solstice = int64(6_000_000)
+	periodLen := int64(buildconstants.SolsticeEpochsPerQuarter)
+	cur := solstice + 2*periodLen + 5
+	start := solstice + 2*periodLen
+
+	snap := &fakeRewardStreamRecipientSnapshot{
+		periodRows: []*po.RewardStreamRecipientPeriod{
+			periodRow("t0199897", start, cur-1, cur-1, "5000000000000000000", "1000000000000000000"),   // 活跃 A：累计 5e18
+			periodRow("t0400111", start, cur-2, cur-2, "5000000000000000000000", "500000000000000000"), // 离场 B：累计 5000e18
+		},
+		periodByAddrRows: []*po.RewardStreamRecipientPeriod{
+			periodRow("t0199897", start, cur-1, cur-1, "5000000000000000000", "1000000000000000000"),
+			periodRow("t0400111", start, cur-2, cur-2, "5000000000000000000000", "500000000000000000"),
+		},
+		earliest: chain.Epoch(cur - 1), earliestFound: true,
+	}
+	biz := NewStatisticRewardStreamLedgerBiz(&fakeRewardStreamsSyncer{epoch: cur}, &fakeRewardStreamLedgerSource{ledger: departedActiveLedger(cur)}, snap, snap)
+	biz.solsticeEpoch = solstice
+
+	resp, err := biz.RewardStreamLedger(context.Background(), filscan.RewardStreamLedgerRequest{})
+	if err != nil {
+		t.Fatalf("不应报错: %s", err)
+	}
+	if len(resp.Recipients) != 2 {
+		t.Fatalf("应返回 2 行（1 活跃 + 1 离场），得到 %d：%v", len(resp.Recipients), recipientAddresses(resp))
+	}
+	// 离场 B 累计（5000e18）压过低累计活跃 A（6e18）⇒ B 在前。
+	assertRecipientOrder(t, resp, []string{"t0400111", "t0199897"})
+	b := recipientByAddress(t, resp, "t0400111")
+	if !b.Departed {
+		t.Fatalf("t0400111 应 departed=true，得到 %v", b.Departed)
+	}
+	if b.ClaimedTotal == nil || !b.ClaimedTotal.Equal(decimal.RequireFromString("5000000000000000000000")) {
+		t.Fatalf("t0400111 累计已收应为 5000e18，得到 %v", b.ClaimedTotal)
+	}
+	a := recipientByAddress(t, resp, "t0199897")
+	if a.Departed {
+		t.Fatalf("t0199897 应 departed=false，得到 %v", a.Departed)
+	}
+	if a.ClaimedTotal == nil || !a.ClaimedTotal.Equal(decimal.RequireFromString("5000000000000000000")) {
+		t.Fatalf("t0199897 累计已收应为 5e18，得到 %v", a.ClaimedTotal)
+	}
+	// 显式序关系（新口径核心）：离场 B 的累计总额 > 活跃 A 的累计总额。
+	if !b.ClaimedTotal.Add(b.PendingClaim).GreaterThan(a.ClaimedTotal.Add(a.PendingClaim)) {
+		t.Fatalf("离场 B 累计总额应大于活跃 A，得到 %s vs %s",
+			b.ClaimedTotal.Add(b.PendingClaim), a.ClaimedTotal.Add(a.PendingClaim))
+	}
+}
+
+// 【新用例②】cali 线上真实数值 ⇒ 期望名次恰为 t090 → t0163912 → t0200442 → t0200206：
+//   - t090(合计 94087499778976942741493) > t0163912(合计 94041482255593704895719)：两人当期应收相同（8552196047066434935695），
+//     凭「累计已收」分先后 —— 旧口径下两人平行、顺序不定；新口径下 t090 必须在前；
+//   - 两个离场者（应收 7507.78 / 4062.44 FIL）凭应收排在两个高累计活跃者之后，彼此按应收降序。
+//
+// 数值取自 cali 线上实测（我从接口核过）。
+func TestRewardStreamLedgerOrderByCumulativeEarningsCaliRealData(t *testing.T) {
+	const solstice = int64(6_000_000)
+	periodLen := int64(buildconstants.SolsticeEpochsPerQuarter)
+	cur := solstice + 2*periodLen + 5
+	start := solstice + 2*periodLen
+	prev := start - periodLen
+
+	// 两个活跃受益方当期应收相同（线上实测 persistence）：share=100% 于 denom ⇒ 应收 = accrued。
+	pending := decimal.RequireFromString("8552196047066434935695")
+	ledger := &londobell.RewardStreamLedger{
+		Epoch: cur, Nv29: true, Denom: decimal.RequireFromString("1000000000000000000"),
+		Streams: []*londobell.RewardStreamLedgerStream{
+			{ID: 1, Implicit: true, EvaluatedWeight: decimal.RequireFromString("500000000000000000")},
+			{ID: 2, Implicit: false, EvaluatedWeight: decimal.RequireFromString("450000000000000000"),
+				Accrued: pending,
+				Recipients: []*londobell.RewardStreamLedgerRecipient{
+					{Address: "t0163912", Share: decimal.RequireFromString("1000000000000000000")},
+				}},
+			{ID: 3, Implicit: false, EvaluatedWeight: decimal.RequireFromString("450000000000000000"),
+				Accrued: pending,
+				Recipients: []*londobell.RewardStreamLedgerRecipient{
+					{Address: "t090", Share: decimal.RequireFromString("1000000000000000000")},
+				}},
+		},
+	}
+
+	snap := &fakeRewardStreamRecipientSnapshot{
+		// 两个离场者只在快照表：结转欠款（carried）取线上实测 pending_claim。
+		rows: []*po.RewardStreamRecipientEpoch{
+			{Epoch: cur - 500, Address: "t0200442", Share: decimal.RequireFromString("262536873156342183"), Payable: decimal.RequireFromString("7507775215796681617728")},
+			{Epoch: cur - 400, Address: "t0200206", Share: decimal.RequireFromString("737500000000000000"), Payable: decimal.RequireFromString("4062440348184312549053")},
+		},
+		// 累计已收：t090 本周期行（保证探针非空）+ t0163912 更早周期行；两个离场者无周期行 ⇒ claimed_total=0。
+		periodRows: []*po.RewardStreamRecipientPeriod{
+			periodRow("t090", start, cur-3, cur-1, "85535303731910507805798", "1000000000000000000"),
+			periodRow("t0163912", prev, prev+1, prev+9, "85489286208527269960024", "1000000000000000000"),
+		},
+		periodByAddrRows: []*po.RewardStreamRecipientPeriod{
+			periodRow("t090", start, cur-3, cur-1, "85535303731910507805798", "1000000000000000000"),
+			periodRow("t0163912", prev, prev+1, prev+9, "85489286208527269960024", "1000000000000000000"),
+		},
+		earliest: chain.Epoch(prev + 1), earliestFound: true,
+	}
+	biz := NewStatisticRewardStreamLedgerBiz(&fakeRewardStreamsSyncer{epoch: cur}, &fakeRewardStreamLedgerSource{ledger: ledger}, snap, snap)
+	biz.solsticeEpoch = solstice
+
+	resp, err := biz.RewardStreamLedger(context.Background(), filscan.RewardStreamLedgerRequest{})
+	if err != nil {
+		t.Fatalf("不应报错: %s", err)
+	}
+	if len(resp.Recipients) != 4 {
+		t.Fatalf("应返回 4 行（2 活跃 + 2 离场），得到 %d：%v", len(resp.Recipients), recipientAddresses(resp))
+	}
+	assertRecipientOrder(t, resp, []string{"t090", "t0163912", "t0200442", "t0200206"})
+
+	// 数值钉死（逐位）：累计总额 = claimed_total + pending_claim，与线上一致。
+	want := map[string][2]string{ // addr -> {claimed_total, pending_claim}
+		"t090":     {"85535303731910507805798", "8552196047066434935695"},
+		"t0163912": {"85489286208527269960024", "8552196047066434935695"},
+		"t0200442": {"0", "7507775215796681617728"},
+		"t0200206": {"0", "4062440348184312549053"},
+	}
+	for _, r := range resp.Recipients {
+		w, ok := want[r.Address]
+		if !ok {
+			t.Fatalf("出现未预期地址 %s", r.Address)
+		}
+		if r.ClaimedTotal == nil || !r.ClaimedTotal.Equal(decimal.RequireFromString(w[0])) {
+			t.Fatalf("%s claimed_total 应为 %s，得到 %v", r.Address, w[0], r.ClaimedTotal)
+		}
+		if !r.PendingClaim.Equal(decimal.RequireFromString(w[1])) {
+			t.Fatalf("%s pending_claim 应为 %s，得到 %s", r.Address, w[1], r.PendingClaim)
+		}
+		if !r.PendingClaimCurrent.Add(r.PendingClaimCarried).Equal(r.PendingClaim) {
+			t.Fatalf("%s 拆列不守恒: %s + %s != %s", r.Address, r.PendingClaimCurrent, r.PendingClaimCarried, r.PendingClaim)
+		}
+	}
+	// departed 语义不变：两个离场者为 true，两个活跃者为 false。
+	for _, addr := range []string{"t0200442", "t0200206"} {
+		if !recipientByAddress(t, resp, addr).Departed {
+			t.Fatalf("%s 应为 departed=true", addr)
+		}
+	}
+	for _, addr := range []string{"t090", "t0163912"} {
+		if recipientByAddress(t, resp, addr).Departed {
+			t.Fatalf("%s 应为 departed=false", addr)
+		}
+	}
+	// 显式序关系（新口径核心）：t090 凭累计已收压过「当期应收相同」的 t0163912。
+	totalOf := func(addr string) decimal.Decimal {
+		r := recipientByAddress(t, resp, addr)
+		return r.ClaimedTotal.Add(r.PendingClaim)
+	}
+	if totalOf("t090").Cmp(totalOf("t0163912")) <= 0 {
+		t.Fatalf("t090 累计总额应大于 t0163912（应收相同 8552196047066434935695，凭累计已收分先后），得到 %s vs %s",
+			totalOf("t090"), totalOf("t0163912"))
+	}
+}
+
+// 【新用例③】排序函数表驱动：key1 累计总额降序 → key2 claimed_total 降序 → key3 address 升序；
+// claimed_total 为 nil（未知/降级）按 0 参与比较、不 panic。每例用多种输入排列各跑多次，断言顺序与 want 一致
+// （证明结果**与输入顺序无关、可重放**）。
+func TestSortRewardStreamRecipientsByCumulativeEarnings(t *testing.T) {
+	dp := func(s string) *decimal.Decimal {
+		d := decimal.RequireFromString(s)
+		return &d
+	}
+	type row struct {
+		addr    string
+		claimed *decimal.Decimal // nil = 未知
+		pending string
+	}
+	cases := []struct {
+		name string
+		in   []row
+		want []string
+	}{
+		{
+			name: "key1 累计总额降序（claimed 与 pending 混合）",
+			in: []row{
+				{"t0100", dp("5"), "5"},   // 合计 10
+				{"t0101", dp("0"), "100"}, // 合计 100
+				{"t0102", dp("50"), "0"},  // 合计 50
+			},
+			want: []string{"t0101", "t0102", "t0100"},
+		},
+		{
+			name: "key2 合计并列按 claimed_total 降序（先收得多的在前）",
+			in: []row{
+				{"t0100", dp("0"), "100"}, // 合计 100，claimed 0
+				{"t0101", dp("100"), "0"}, // 合计 100，claimed 100
+				{"t0102", dp("40"), "60"}, // 合计 100，claimed 40
+			},
+			want: []string{"t0101", "t0102", "t0100"},
+		},
+		{
+			name: "key3 claimed_total 也并列按 address 升序",
+			in: []row{
+				{"t0202", dp("10"), "0"},
+				{"t0200", dp("10"), "0"},
+				{"t0201", dp("10"), "0"},
+				{"t0300", dp("11"), "0"}, // 合计更大，必在最前
+			},
+			want: []string{"t0300", "t0200", "t0201", "t0202"},
+		},
+		{
+			name: "claimed_total 为 nil（未知/降级）按 0 参与比较、不 panic",
+			in: []row{
+				{"t0100", nil, "100"},    // 合计 100，claimed 未知按 0
+				{"t0101", dp("50"), "0"}, // 合计 50，claimed 50
+				{"t0102", nil, "50"},     // 合计 50，claimed 未知按 0
+			},
+			want: []string{"t0100", "t0101", "t0102"},
+		},
+		{
+			name: "cali 四地址真实值 ⇒ t090→t0163912→t0200442→t0200206",
+			in: []row{
+				{"t0163912", dp("85489286208527269960024"), "8552196047066434935695"},
+				{"t090", dp("85535303731910507805798"), "8552196047066434935695"},
+				{"t0200442", dp("0"), "7507775215796681617728"},
+				{"t0200206", dp("0"), "4062440348184312549053"},
+			},
+			want: []string{"t090", "t0163912", "t0200442", "t0200206"},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			n := len(tc.in)
+			// 输入排列：原序 + n−1 个左旋 + 逆序（确定性判据：实现必须与输入顺序无关）。
+			perms := make([][]int, 0, n+1)
+			for s := 0; s < n; s++ {
+				p := make([]int, n)
+				for k := 0; k < n; k++ {
+					p[k] = (s + k) % n
+				}
+				perms = append(perms, p)
+			}
+			rev := make([]int, n)
+			for k := 0; k < n; k++ {
+				rev[k] = n - 1 - k
+			}
+			perms = append(perms, rev)
+
+			wantJoin := strings.Join(tc.want, ",")
+			for pi, perm := range perms {
+				got := make([]*filscan.RewardStreamRecipient, 0, n)
+				for _, idx := range perm {
+					r := tc.in[idx]
+					var claimed *decimal.Decimal
+					if r.claimed != nil {
+						v := *r.claimed // 值拷贝，避免多次运行共享同一指针被就地改动
+						claimed = &v
+					}
+					got = append(got, &filscan.RewardStreamRecipient{
+						Address:      r.addr,
+						ClaimedTotal: claimed,
+						PendingClaim: decimal.RequireFromString(r.pending),
+					})
+				}
+				// 同一输入多次运行顺序必须一致。
+				for run := 0; run < 5; run++ {
+					sortRewardStreamRecipientsByCumulativeEarnings(got)
+					gotAddr := make([]string, 0, n)
+					for _, r := range got {
+						gotAddr = append(gotAddr, r.Address)
+					}
+					if strings.Join(gotAddr, ",") != wantJoin {
+						t.Fatalf("排列 #%d 第 %d 次运行顺序应为 %v，得到 %v", pi, run, tc.want, gotAddr)
+					}
+				}
+			}
+		})
 	}
 }

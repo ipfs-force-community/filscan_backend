@@ -107,6 +107,10 @@ func (s StatisticRewardStreamLedgerBiz) RewardStreamLedger(ctx context.Context, 
 	s.appendDepartedRecipients(ctx, resp, ledger, epoch.Int64())
 	// 累计已收：必须在本周期离场者补齐**之后**算，才能覆盖「活跃 + 离场」的全部地址（一次批量查、内存 SUM）。
 	s.attachClaimedTotals(ctx, resp, epoch.Int64())
+	// 整榜单一名次：按「累计从奖励流获得的总额」= claimed_total + pending_claim 降序重排。
+	// 必须在 attachClaimedTotals **之后** —— claimed_total 在那里才回填，排序键需要它。两段拼接的**构造**（谁入榜）
+	// 保持不变；这里只覆盖最终顺序（原来的分段排序可留可去，不影响结果）。见函数注释「口径来源」。
+	sortRewardStreamRecipientsByCumulativeEarnings(resp.Recipients)
 	return resp, nil
 }
 
@@ -239,11 +243,13 @@ type rewardStreamRecipientAgg struct {
 //     （优先取快照行 Payable；仅有归集来源时为 0，归集表不存 payable）、pending_claim=carried（保持 pending==current+carried）、
 //     departed=true、left_epoch=两来源 (快照行 epoch / 该地址全部归集行 last_epoch) 的较大者、
 //     last_share_pct=优先取快照行（该地址全局 epoch 最大那一行）的 Share，快照没有则该地址退回归集表**周期起点最大**那一行的 last_share（同一 sharePercent 口径）；
-//   - 排序：活跃行保持原序并一律在前，离场行补在末尾、内部按 pending_claim_carried 降序（相等按地址升序）；
+//   - 排序（仅本函数内部构造顺序）：活跃行保持原序并一律在前，离场行补在末尾、内部按 pending_claim_carried 降序（相等按地址升序）；
+//     接口最终会对整张榜重排（见文件末 sortRewardStreamRecipientsByCumulativeEarnings），故此处顺序不决定对外名次；
 //   - **任一来源取数失败必须降级**：打 WARN 后该来源按空处理，接口不得 500。
 //
-// 输出顺序＝「服务受益方排行」顺序：按待付 pending_claim 降序，pending 相等时按地址升序（稳定）；
-// 不做截断，全部返回（前端按序取前 N）。
+// 输出顺序（**构造期临时顺序，最终以整榜单一名次为准**）：本函数与 appendDepartedRecipients 先产出「活跃在前 + 离场附后」
+// 的两段构造顺序；接口在 attachClaimedTotals 之后调用 sortRewardStreamRecipientsByCumulativeEarnings 对整张榜重排为
+// 「按累计得到的收益（claimed_total + pending_claim）降序」的单一名次（产品口径）。此处不做截断，全部返回（前端按序取前 N）。
 func buildRewardStreamRecipients(ledger *londobell.RewardStreamLedger, denom decimal.Decimal) []*filscan.RewardStreamRecipient {
 	agg := make(map[string]*rewardStreamRecipientAgg)
 	get := func(addr string) *rewardStreamRecipientAgg {
@@ -332,6 +338,54 @@ func buildRewardStreamRecipients(ledger *londobell.RewardStreamLedger, denom dec
 		})
 	}
 	return out
+}
+
+// sortRewardStreamRecipientsByCumulativeEarnings 对**整张榜**做一次单一名次排序（就地重排，不改任何字段值）。
+//
+// 排序键（口径来源：产品要求 —— 受益方榜按「累积得到的收益」排**一条****名次**，不分「活跃在前 + 离场附后」两段）：
+//
+//	key1 = claimed_total（累计已收，随接口回填） + pending_claim（累计应收）= 该地址累计从奖励流获得的总额，降序；
+//	key2 = claimed_total 降序（总额并列时，先收得多的在前）；
+//	key3 = address 升序（仍并列时按地址升序 —— 保证结果确定、可重放）。
+//
+// 只改顺序：departed / left_epoch / last_share_pct / removed_stream 等字段语义与取值都不变（前端靠 departed 显示徽标）。
+//
+// 未知值处理：claimed_total 为 nil（累计来源降级 / 本周期尚无归集，口径见 attachClaimedTotals）时按 0 参与比较
+// —— 不臆造金额，仅用于定序；此时 key1 退化为 pending_claim，顺序仍确定、接口照常可用（不得 500）。
+//
+// 用 decimal 精确比较（Cmp），**不转 float64**：attoFIL 值远超 float64 有效位数（float64 只有 ~15–17 位十进制），
+// 转 float 会丢精度导致排序错（如 cali 实测 94087499778976942741493 与 94041482255593704895719 会变相等）。
+func sortRewardStreamRecipientsByCumulativeEarnings(recipients []*filscan.RewardStreamRecipient) {
+	if len(recipients) < 2 {
+		return
+	}
+	// claimed 与累计总额：nil 表示未知，按 0 参与比较（不臆造金额，仅定序）。nil 行防御性返回零值，不 panic。
+	keys := func(r *filscan.RewardStreamRecipient) (claimed, total decimal.Decimal) {
+		if r == nil {
+			return decimal.Zero, decimal.Zero
+		}
+		if r.ClaimedTotal != nil {
+			claimed = *r.ClaimedTotal
+		}
+		return claimed, claimed.Add(r.PendingClaim)
+	}
+	address := func(r *filscan.RewardStreamRecipient) string {
+		if r == nil {
+			return ""
+		}
+		return r.Address
+	}
+	sort.SliceStable(recipients, func(i, j int) bool {
+		ci, ti := keys(recipients[i])
+		cj, tj := keys(recipients[j])
+		if c := ti.Cmp(tj); c != 0 {
+			return c > 0
+		}
+		if c := ci.Cmp(cj); c != 0 {
+			return c > 0
+		}
+		return address(recipients[i]) < address(recipients[j])
+	})
 }
 
 // mulDiv 整数精确计算 (a×b)/c（a/b/c 均为非负整数值的 decimal），避免 decimal.Div 的精度截断。
