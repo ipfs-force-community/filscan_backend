@@ -475,11 +475,16 @@ func (e *ERC20Task) handleERC20Transfer(ctx *syncer.Context, trace *londobell.Tr
 	}
 
 	receipt, err := ctx.Agg().GetTransactionReceiptByCid(ctx.Context(), cids)
-	if err == impl.ErrNotFound {
-		log.Error(err)
-		return nil, nil, nil, nil
-	}
 	if err != nil {
+		// ③ 未就绪（聚合器回 code:2 ⇒ impl.ErrNotFound）：语义是「这条消息的事件文档还没落库」
+		// （聚合器侧近链头水位领先正式提交水位 17~37 高度，见 filscan-data-pipeline-ops 技能）。
+		// 它和「这条消息真的没有日志」**不可区分**，静默跳过就是真实数据永久丢失
+		// （2026-10-17 主网 fevm.erc_20_transfers 约四成高度整段缺行的根因）。
+		// 因此必须上抛让本高度重试：类归 unknown（不计入「连续 N 次失败即跳过」防线、也不清零），
+		// 与 modules/syncer/data_error.go 对 code:2 的口径（未就绪、保持重试）一致。
+		if err == impl.ErrNotFound {
+			return nil, nil, nil, fmt.Errorf("get transaction receipt by cid not ready（事件文档还没落库，按未就绪重试本高度）: %w", err)
+		}
 		// ① 传输级错误（聚合器不通/超时）仍然上抛：那是暂时的，重试即可，
 		// 且不会被「连续 N 次失败即跳过」防线计入（分类为 transport 不为数据级）。
 		if syncer.ClassifySyncError(err) == syncer.ErrorKindTransport {

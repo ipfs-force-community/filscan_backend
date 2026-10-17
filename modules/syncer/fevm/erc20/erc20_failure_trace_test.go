@@ -9,6 +9,7 @@ import (
 	"gitlab.forceup.in/fil-data-factory/filscan-backend/modules/syncer"
 	"gitlab.forceup.in/fil-data-factory/filscan-backend/pkg/chain"
 	"gitlab.forceup.in/fil-data-factory/filscan-backend/pkg/londobell"
+	"gitlab.forceup.in/fil-data-factory/filscan-backend/pkg/londobell/impl"
 )
 
 // fakeAgg 只覆写本用例用到的方法：内嵌接口让其余方法保持「未实现即 panic」，
@@ -170,6 +171,36 @@ func TestHandleERC20TransferKeepsTransportErrorRetryable(t *testing.T) {
 	require.Error(t, err)
 	require.Equal(t, syncer.ErrorKindTransport, syncer.ClassifySyncError(err),
 		"传输级错误必须保持可重试语义（不计入跳过防线）")
+}
+
+// TestHandleERC20TransferNotReadyRetriesEpoch 覆盖「静默丢数」根因本身：
+// 聚合器回 code:2（客户端转成 impl.ErrNotFound，语义是「这条消息的事件文档还没落库」）时
+// 必须上抛让本高度重试 —— 旧实现是 log.Error + return nil（静默跳过），
+// 与「这条消息真的没有日志」不可区分，于是整批事件被永久丢掉
+// （2026-10-17 主网 fevm.erc_20_transfers 约四成高度整段缺行即由此而来）。
+func TestHandleERC20TransferNotReadyRetriesEpoch(t *testing.T) {
+
+	agg := &fakeAgg{err: impl.ErrNotFound}
+
+	task := &ERC20Task{}
+	ctx := syncer.NewTestContext(nil, agg, epoch())
+	trace := &londobell.TraceMessage{
+		ID: "bafyMsgC-5", Cid: "bafyMsgC",
+		MsgRct: &londobell.MsgRct{ExitCode: 0},
+	}
+
+	balances, transfers, swaps, err := task.handleERC20Transfer(ctx, trace)
+
+	require.Error(t, err, "事件文档还没落库（code:2）必须上抛重试，不能静默跳过丢掉本高度的事件")
+	require.Nil(t, balances)
+	require.Nil(t, transfers)
+	require.Nil(t, swaps)
+	require.Equal(t, 1, agg.calls)
+
+	// 未就绪语义：既不算数据级（那会在连续 5 次后登记跳过该高度＝丢数），
+	// 也不算传输级（那只是分类不同，同样保持重试）。
+	require.Equal(t, syncer.ErrorKindUnknown, syncer.ClassifySyncError(err),
+		"未就绪错误应落在「不计入也不跳过、保持重试」的类别里")
 }
 
 func strPtr(v string) *string { return &v }
