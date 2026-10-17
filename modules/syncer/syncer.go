@@ -165,6 +165,26 @@ func WithSkipLedger(ledger repository.SyncerSkipLedger) Option {
 	}
 }
 
+// WithCommitHeightGate 让该同步器的消费门槛取 min(近链头水位, 正式提交水位)。
+//
+// 为什么需要（2026-10-17 主网实测）：按「交易回执日志」取数的任务（erc20 / nft / fns）读的是
+// 正式库（bell 批次）里的 `EventsRoot` 事件文档，而 run() 的门槛原本只看
+// /aggregators/latest_tipset（近链头水位，实测几乎贴着链头）。同一时刻两个水位的实测差值：
+// latest_tipset=6464450/6464451，final_height=6464428（**落后约 22 高度 ≈ 11 分钟**）。
+//
+// 后果：高度一越过近链头水位就被消费，此刻该高度的事件文档还没落库；聚合器把「查不到事件」
+// 容忍成空回执（`code:0` + `logs:[]`），任务侧 `len(receipt.Logs)==0` 静默跳过
+// ⇒ **该高度整段 0 行、且永不重试**（实测 `fevm.erc_20_transfers` 约四成高度中招，
+// 详见技能 filscan-data-pipeline-ops 的 references/receipt-logs-not-ready.md）。
+//
+// 开启后这类同步器等正式提交水位越过该高度才开始处理：代价是数据比近链头晚约 10~13 分钟，
+// 换来「不丢行」；正式水位取不到时按「未就绪」等待下一轮（不写数据、不计跳过）。
+func WithCommitHeightGate() Option {
+	return func(conf *config) {
+		conf.commitHeightGate = true
+	}
+}
+
 // WithGlobalRollback 全局回滚函数
 func WithGlobalRollback(h ...func(ctx context.Context, gteEpoch chain.Epoch) error) Option {
 	return func(conf *config) {
@@ -199,6 +219,10 @@ type config struct {
 	unrecoverableErrorThreshold int64 // 配置项：syncer.unrecoverable_error_threshold（默认 20）
 	stateGapJumpMinGap          int64 // 触发「一次跳过整段不可恢复区间」的最小缺口（默认 1000）
 	stateGapJumpMargin          int64 // 区间跳目标高度 = 链头 − margin（默认 200）
+	// commitHeightGate 消费门槛是否取 min(近链头水位, 正式提交水位)，默认 false（只看近链头水位）。
+	// 按「交易回执日志」取数的同步器（erc20 / nft / fns）必须开启：正式库的事件文档落后于近链头
+	// 水位约 20 高度（10~13 分钟），不开启会读到「事件还没落库」的空回执而静默丢行，见 WithCommitHeightGate。
+	commitHeightGate bool
 }
 
 func isValidSyncerName(name string) bool {
@@ -417,6 +441,33 @@ func (s *Syncer) getAggFinalTipset() (final *londobell.Tipset, err error) {
 	return
 }
 
+// commitGatedHeight 计算本轮可消费到的高度：
+//   - 未开启 commitHeightGate（默认）：直接用近链头水位 head；
+//   - 开启：取 min(近链头水位 head, 正式提交水位 /aggregators/final_height)；
+//     正式水位取不到时返回错误，调用方按「未就绪」等下一轮（不写数据、不计跳过）。
+//
+// 语义边界：只做「不超前消费」，不做任何水位回退；正式水位 ≥ 近链头水位时保持 head 不变。
+func (s *Syncer) commitGatedHeight(head chain.Epoch) (chain.Epoch, error) {
+	if !s.commitHeightGate {
+		return head, nil
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	committed, err := s.agg.FinalHeight(ctx)
+	if err != nil {
+		return 0, fmt.Errorf("call agg final height error: %s", err)
+	}
+	if committed == nil {
+		return 0, fmt.Errorf("call agg final height error: empty result")
+	}
+	if *committed < head {
+		return *committed, nil
+	}
+	return head, nil
+}
+
 // 检查 Agg 同步的最新高度
 // 如果同步器超过了该高度，则需要等待
 func (s *Syncer) checkAggFinalTipsetHeight(final chain.Epoch) (sleep bool) {
@@ -467,6 +518,15 @@ func (s *Syncer) run() {
 		return
 	}
 	finalHeight = chain.Epoch(final.ID - 1) // FinalHeight 拿的是 block 高度，会反复 revert
+
+	// 按交易回执日志取数的同步器等正式提交水位（见 WithCommitHeightGate）：
+	// 正式水位还没越过本高度时等下一轮，绝不把「事件文档还没落库」当成「该高度没有数据」。
+	finalHeight, err = s.commitGatedHeight(finalHeight)
+	if err != nil {
+		s.log.Debugf("等待正式提交水位: %s, 错误: %s", s.epoch, err)
+		time.Sleep(3 * time.Second)
+		return
+	}
 
 	next := chain.CurrentEpoch()
 	if s.epoch == next {

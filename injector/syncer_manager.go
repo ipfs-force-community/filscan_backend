@@ -259,6 +259,7 @@ func NewSyncerManager(conf *config.Config, db *gorm.DB, agg londobell.Agg, miner
 		// Erc20 数据同步器
 		newSyncer(conf, db, agg, adapter,
 			syncer.WithName(syncer.Erc20Syncer),
+			syncer.WithCommitHeightGate(), // 回执日志来自正式库批次，门槛必须等正式提交水位（否则整高度静默丢行）
 			syncer.WithContextBuilder(SetTracesBuilder),
 			syncer.WithTaskGroup(
 				[]syncer.Task{
@@ -281,6 +282,7 @@ func NewSyncerManager(conf *config.Config, db *gorm.DB, agg londobell.Agg, miner
 		//  Fns 数据同步器
 		newSyncer(conf, db, agg, adapter,
 			syncer.WithName(syncer.FnsSyncer),
+			syncer.WithCommitHeightGate(), // 走 GetEvents（回执日志）⇒ 同 erc20，须等正式提交水位
 			syncer.WithContextBuilder(SetTracesBuilder),
 			//syncer.WithInitEpoch(&opengateInitEpoch),
 			//syncer.WithSkipSyncEpoch(2964768),
@@ -311,6 +313,7 @@ func NewSyncerManager(conf *config.Config, db *gorm.DB, agg londobell.Agg, miner
 		// nft 同步器
 		newSyncer(conf, db, agg, adapter,
 			syncer.WithName(syncer.NFTSyncer),
+			syncer.WithCommitHeightGate(), // 走 GetEvents（回执日志）⇒ 同 erc20，须等正式提交水位
 			syncer.WithInitEpoch(nil), // 上线时从当前高度开始同步，历史数据自动补
 			syncer.WithContextBuilder(SetTracesBuilder),
 			syncer.WithTaskGroup(
