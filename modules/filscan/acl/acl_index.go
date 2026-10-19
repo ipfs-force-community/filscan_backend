@@ -206,11 +206,17 @@ func rewardStreamDeltas24H(streams []*londobell.RewardStream) RewardStreamDeltas
 	if first.Epoch == last.Epoch {
 		return RewardStreamDeltas24H{}
 	}
+	miner := last.MinerMinted().Sub(first.MinerMinted())
+	service := last.TotalExplicitMinted.Sub(first.TotalExplicitMinted)
+	burn := last.TotalBurnMinted.Sub(first.TotalBurnMinted)
+	// 合计不用 ΔTotalMintedReward：24h 窗口跨 NV29 时首行是 v18 快照（无该字段，取 0），
+	// Δ 会得到累计铸造量（实测 4.1e26，量级错 4 个数量级）而不是 24h 增量。
+	// 三股合计在两代口径下都等于铸造量：v18 全部进共识流；v19 起 miner=minted−burn−explicit。
 	return RewardStreamDeltas24H{
-		Miner:   last.MinerMinted().Sub(first.MinerMinted()),
-		Service: last.TotalExplicitMinted.Sub(first.TotalExplicitMinted),
-		Burn:    last.TotalBurnMinted.Sub(first.TotalBurnMinted),
-		Total:   last.TotalMintedReward.Sub(first.TotalMintedReward),
+		Miner:   miner,
+		Service: service,
+		Burn:    burn,
+		Total:   miner.Add(service).Add(burn),
 		OK:      true,
 	}
 }

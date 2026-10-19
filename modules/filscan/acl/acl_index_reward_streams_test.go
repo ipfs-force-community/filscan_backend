@@ -150,6 +150,38 @@ func TestGetHomeRewardStreams24HSingleAggCall(t *testing.T) {
 	}
 }
 
+// ⑥ 24h 窗口跨 NV29 激活点（首行 v18 只有 TotalStoragePowerReward、末行 v19 才有三枚计数器）：
+// 合计必须是三股之和，不能拿 ΔTotalMintedReward（首行取 0 ⇒ 得到累计铸造量，量级错 4 个数量级）。
+// 实测 2026-10-19 主网激活后首页即命中此形态：total 一度返回 4.1e26 atto。
+func TestRewardStreamDeltas24HStraddlingFork(t *testing.T) {
+	rows := []*londobell.RewardStream{
+		{ // 激活前整点快照：v18 口径
+			Epoch:                   6470160,
+			TotalStoragePowerReward: decimal.RequireFromString("1000000000000000000000"),
+		},
+		{ // 激活后整点快照：v19 口径
+			Epoch:               6470400,
+			TotalMintedReward:   decimal.RequireFromString("1600000000000000000000"),
+			TotalBurnMinted:     decimal.RequireFromString("60000000000000000000"),
+			TotalExplicitMinted: decimal.RequireFromString("140000000000000000000"),
+		},
+	}
+	d := rewardStreamDeltas24H(rows)
+	if !d.OK {
+		t.Fatal("跨激活点窗口应 OK=true")
+	}
+	if !d.Miner.Equal(decimal.RequireFromString("400000000000000000000")) {
+		t.Fatalf("miner 差分错: got %s want 400e18", d.Miner)
+	}
+	if !d.Total.Equal(decimal.RequireFromString("600000000000000000000")) {
+		t.Fatalf("跨激活点 total 必须是 24h 增量 600e18（不是累计 1600e18）: got %s", d.Total)
+	}
+	if !d.Total.Equal(d.Miner.Add(d.Service).Add(d.Burn)) {
+		t.Fatalf("total 必须等于三股之和: total=%s miner+service+burn=%s",
+			d.Total, d.Miner.Add(d.Service).Add(d.Burn))
+	}
+}
+
 // 首页路径上游报错：赢票奖励回退旧口径（WARN）、三流 OK=false、仍只调 1 次、不 panic。
 func TestGetHomeRewardStreams24HAggErrorFallsBack(t *testing.T) {
 	logs := captureAclLogs(t)
