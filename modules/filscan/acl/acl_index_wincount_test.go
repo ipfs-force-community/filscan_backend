@@ -89,10 +89,13 @@ func newTestAcl(agg *fakeIndexAgg, adapter *fakeIndexAdapter, repo *fakeWinCount
 	return NewIndexAclImpl(agg, adapter, repo)
 }
 
+// twoRealStreams 两条相隔 2880（一整天）的真实形态整点快照：v18 口径用 TotalStoragePowerReward。
+// 跨度必须是整 24 小时——rewardStreamTailBounds 会按「末行−2880」归一化端点，
+// 跨度不足时拿不到左锚点、只能退回首行（那是「数据太短」的兜底，不是正常路径）。
 func twoRealStreams() []*londobell.RewardStream {
 	return []*londobell.RewardStream{
-		{Epoch: 1000, TotalStoragePowerReward: decimal.RequireFromString("100000000000000000000000")},
-		{Epoch: 1120, TotalStoragePowerReward: decimal.RequireFromString("165000000000000000000000")},
+		{Epoch: 6426960, TotalStoragePowerReward: decimal.RequireFromString("100000000000000000000000")},
+		{Epoch: 6429840, TotalStoragePowerReward: decimal.RequireFromString("165000000000000000000000")},
 	}
 }
 
@@ -113,8 +116,12 @@ func TestGetWinCountRewardMeasuredSuccess(t *testing.T) {
 	if !got.Equal(want) {
 		t.Fatalf("实测每赢票奖励错: got %s want %s", got, want)
 	}
-	if agg.start != epoch-2880 || agg.end != epoch+1 {
-		t.Fatalf("窗口错: got [%d,%d) want [%d,%d)", agg.start, agg.end, epoch-2880, epoch+1)
+	if agg.start != epoch-2880-120 || agg.end != epoch+1 {
+		t.Fatalf("取数窗口错: got [%d,%d) want [%d,%d)", agg.start, agg.end, epoch-2880-120, epoch+1)
+	}
+	// 分母与分子同窗：端点＝归一化后的 [末行−2880, 末行]（本例链头恰在整点，故等于请求窗口末端）。
+	if repo.start != 6426960 || repo.end != 6429840 {
+		t.Fatalf("赢票数窗口错: got [%d,%d) want [6426960,6429840)", repo.start, repo.end)
 	}
 	if adapter.calls != 0 {
 		t.Fatalf("正常路径不该回退旧口径（调用了 actor %d 次）", adapter.calls)
@@ -260,74 +267,59 @@ func TestMinerMintedDelta(t *testing.T) {
 	}
 }
 
-// 窗口起点必须整点对齐：链头不在整点上时也要请求到完整 24 小时。
+// 端点归一化：整点快照跨度 3000 epoch 时，差分必须只取 [末行−2880, 末行]，不能把首行当左端。
 //
-// 聚合器只存整点快照，起点不整点时第一个快照会被推到下一个整点 ⇒ 首尾差分只覆盖 23 小时
-// （主网 2026-10-21 实测 24h 档仅 23 个点、三流合计比链上 2880 epoch 计数器差分少 4%）。
-func TestRewardStreamsWindowHourAligned(t *testing.T) {
-	agg := &fakeIndexAgg{streams: twoRealStreams()}
-	repo := &fakeWinCountRepo{sum: 100, covered: 2880}
-	a := newTestAcl(agg, &fakeIndexAdapter{}, repo)
-
-	const head chain.Epoch = 6429840 + 47 // 非整点链头
-	if _, err := a.GetWinCountReward(context.Background(), head); err != nil {
-		t.Fatalf("不应报错: %s", err)
+// 这是「24h 三流少算 1 小时（低约 4%）」的根因：聚合器最新一行可能是链头整点、也可能是前一个小时，
+// 直接用首行/末行求差，跨度恒在 2640~2880 之间漂（实测主网 24h 档只有 23 个点）。
+func TestRewardStreamTailBoundsExact24h(t *testing.T) {
+	row := func(e chain.Epoch, v int64) *londobell.RewardStream {
+		return &londobell.RewardStream{Epoch: int64(e), TotalStoragePowerReward: decimal.NewFromInt(v)}
 	}
-
-	const wantStart chain.Epoch = 6426960 // floor(6429887 − 2880) 到整点
-	if agg.start != wantStart || agg.end != head+1 {
-		t.Fatalf("取数窗口错: got [%d,%d) want [%d,%d)", agg.start, agg.end, wantStart, head+1)
+	const last chain.Epoch = 6429840
+	streams := []*londobell.RewardStream{
+		row(last-3000, 1000), // 多取的那一小时（首行，不应作为左端）
+		row(last-2880, 2000), // ← 正确左端
+		row(last-120, 3000),
+		row(last, 4000),
 	}
-	// 分母同窗：起点同样整点对齐。本例快照 epoch（1000/1120）不在窗口内 ⇒ 末端退回链头。
-	if repo.start != wantStart || repo.end != head {
-		t.Fatalf("赢票数窗口错: got [%d,%d) want [%d,%d)", repo.start, repo.end, wantStart, head)
+	start, end, ok := rewardStreamTailBounds(streams)
+	if !ok {
+		t.Fatal("应 ok=true")
 	}
-}
-
-// 分母末端＝分子实际覆盖到的最后一个整点快照（分子只能用闭合整点，分母曾多算 0~120 epoch ⇒ 偏低）。
-func TestWinCountRewardWindowEndFollowsLastSnapshot(t *testing.T) {
-	const head chain.Epoch = 6429840 + 47
-	const start chain.Epoch = 6426960
-	const lastSnapshot chain.Epoch = 6429840 // 最后一个闭合整点，跨度恰好 2880
-
-	row := func(e chain.Epoch, minted int64) *londobell.RewardStream {
-		return &londobell.RewardStream{
-			Epoch:             int64(e),
-			TotalMintedReward: decimal.NewFromInt(minted),
-		}
+	if start != last-2880 || end != last {
+		t.Fatalf("端点错: got [%d,%d] want [%d,%d]", start, end, last-2880, last)
 	}
-	agg := &fakeIndexAgg{streams: []*londobell.RewardStream{row(start, 1000), row(lastSnapshot, 2000)}}
-	repo := &fakeWinCountRepo{sum: 100, covered: 2880}
-	a := newTestAcl(agg, &fakeIndexAdapter{}, repo)
-
-	if _, err := a.GetWinCountReward(context.Background(), head); err != nil {
-		t.Fatalf("不应报错: %s", err)
+	d := rewardStreamDeltas24H(streams)
+	if !d.OK {
+		t.Fatal("差分应 OK")
 	}
-	if repo.start != start || repo.end != lastSnapshot {
-		t.Fatalf("分母窗口应与分子同窗: got [%d,%d) want [%d,%d)", repo.start, repo.end, start, lastSnapshot)
+	if !d.Miner.Equal(decimal.NewFromInt(2000)) {
+		t.Fatalf("差分应取 [末行−2880, 末行]（4000−2000=2000），得到 %s", d.Miner)
 	}
 }
 
-// 末端不可信时退回链头：最后一个快照离起点不足 24h（上游抽取落后）不能让窗口缩水。
-func TestWinCountRewardWindowEndFallsBackWhenShort(t *testing.T) {
-	const head chain.Epoch = 6429840 + 47
-	const start chain.Epoch = 6426960
-
-	row := func(e chain.Epoch, minted int64) *londobell.RewardStream {
-		return &londobell.RewardStream{
-			Epoch:             int64(e),
-			TotalMintedReward: decimal.NewFromInt(minted),
-		}
+// 序列短于 24h（快照太稀）⇒ 退回序列首行，保持既有「至少两行即可用」的行为。
+func TestRewardStreamTailBoundsShortSeriesFallsBack(t *testing.T) {
+	streams := []*londobell.RewardStream{
+		{Epoch: 1000, TotalStoragePowerReward: decimal.NewFromInt(1000)},
+		{Epoch: 1120, TotalStoragePowerReward: decimal.NewFromInt(2000)},
 	}
-	// 末端只到起点 + 600 epoch（不足 24h）。
-	agg := &fakeIndexAgg{streams: []*londobell.RewardStream{row(start, 1000), row(start+600, 2000)}}
-	repo := &fakeWinCountRepo{sum: 100, covered: 2880}
-	a := newTestAcl(agg, &fakeIndexAdapter{}, repo)
-
-	if _, err := a.GetWinCountReward(context.Background(), head); err != nil {
-		t.Fatalf("不应报错: %s", err)
+	start, end, ok := rewardStreamTailBounds(streams)
+	if !ok {
+		t.Fatal("两行应 ok=true")
 	}
-	if repo.end != head {
-		t.Fatalf("末端应退回链头 %d，得到 %d", head, repo.end)
+	if start != 1000 || end != 1120 {
+		t.Fatalf("应退回首行: got [%d,%d]", start, end)
+	}
+}
+
+// 非整点链头：取数起点要 floor 到整点再往前 1 小时（保证「末行−2880」那行在结果里）。
+func TestRewardStreamsFetchStartAligned(t *testing.T) {
+	if got, want := rewardStreamsFetchStart(6429887), chain.Epoch(6426840); got != want {
+		t.Fatalf("取数起点错: got %d want %d", got, want)
+	}
+	// 整点链头同样往前 1 小时，末行退到 floor−120 时仍有左锚点。
+	if got, want := rewardStreamsFetchStart(6429840), chain.Epoch(6426840); got != want {
+		t.Fatalf("整点链头取数起点错: got %d want %d", got, want)
 	}
 }

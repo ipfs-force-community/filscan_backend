@@ -270,3 +270,26 @@ func TestRewardStreamsResolvesWindow24hHourAligned(t *testing.T) {
 		t.Fatalf("24h 窗口错: got [%d,%d) want [%d,%d)", agg.start, agg.end, wantStart, head+1)
 	}
 }
+
+// 取数起点比窗口早 1 小时（留左锚点）⇒ 系列可能多出左边一个点；曲线必须裁到档位跨度内。
+func TestTrimRewardStreamItemsToSpan(t *testing.T) {
+	mk := func(eps ...int64) []*filscan.RewardStreamItem {
+		out := make([]*filscan.RewardStreamItem, 0, len(eps))
+		for _, e := range eps {
+			out = append(out, &filscan.RewardStreamItem{Epoch: e})
+		}
+		return out
+	}
+	items := mk(6426240, 6426360, 6426480, 6426600) // 最后一行 6426600，跨度 360
+	got := trimRewardStreamItemsToSpan(items, 240)
+	if len(got) != 2 || got[0].Epoch != 6426480 || got[1].Epoch != 6426600 {
+		t.Fatalf("应只保留最后 240 epoch 内的点，得到 %d 个", len(got))
+	}
+	// 空/异常跨度：原样返回，不 panic。
+	if got := trimRewardStreamItemsToSpan(nil, 240); got != nil {
+		t.Fatal("nil 应原样返回")
+	}
+	if got := trimRewardStreamItemsToSpan(items, 0); len(got) != 4 {
+		t.Fatal("span<=0 应原样返回")
+	}
+}

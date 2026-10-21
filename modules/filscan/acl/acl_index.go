@@ -189,9 +189,19 @@ type RewardStreamDeltas24H struct {
 	OK      bool
 }
 
-// rewardStreamDeltas24H 纯函数：由整点快照序列算首尾差分。任一端缺失 / 不足两行 / 首尾同高 ⇒ OK=false。
-// 契约 A 已按 Epoch 升序返回，这里仍先排序再取首尾，避免上游顺序变化时取错端点。
-func rewardStreamDeltas24H(streams []*londobell.RewardStream) RewardStreamDeltas24H {
+// rewardStreamTailBounds 把「窗口内取到的整点快照」归一化成**恰好 24 小时**的两个端点：
+// end＝序列最后一行，start＝epoch 不大于 end−2880 的最近一行（优先正好等于）。
+//
+// 为什么必须归一化而不是直接用首行/末行：
+//   - 聚合器只存整点快照，且**最新一行可能是链头所在整点，也可能是它的前一个小时**（写入有延迟）；
+//   - 因此「请求起点取整点」也不够——起点对齐后，若末行比请求终点早 120 epoch，
+//     首行→末行仍然只有 23 小时。主网 2026-10-21 实测：24h 档只有 23 个点，
+//     三流合计 54,187.43 vs 链上 f02 计数器 2880 epoch 差分 56,574.77（低 4.2%），
+//     且「近24h出块奖励 53,700 + 服务流 2,753」加不平。
+//   - 按末行倒推 2880 则与「末行是 H 还是 H−120」无关，恒为完整 24 小时。
+//
+// 拿不到 24h 左锚点（快照太稀/序列太短）时退回序列首行，保持既有「至少两行即 OK」的行为。
+func rewardStreamTailBounds(streams []*londobell.RewardStream) (start, end chain.Epoch, ok bool) {
 	valid := make([]*londobell.RewardStream, 0, len(streams))
 	for _, s := range streams {
 		if s != nil {
@@ -199,11 +209,46 @@ func rewardStreamDeltas24H(streams []*londobell.RewardStream) RewardStreamDeltas
 		}
 	}
 	if len(valid) < 2 {
-		return RewardStreamDeltas24H{}
+		return 0, 0, false
 	}
 	sort.Slice(valid, func(i, j int) bool { return valid[i].Epoch < valid[j].Epoch })
-	first, last := valid[0], valid[len(valid)-1]
-	if first.Epoch == last.Epoch {
+	end = chain.Epoch(valid[len(valid)-1].Epoch)
+	target := end - chain.Epoch(winCountRewardWindowEpochs)
+	for _, s := range valid {
+		if e := chain.Epoch(s.Epoch); e <= target && e > start {
+			start = e
+		}
+	}
+	if start == 0 {
+		start = chain.Epoch(valid[0].Epoch)
+	}
+	if start == end {
+		return 0, 0, false
+	}
+	return start, end, true
+}
+
+// rewardStreamDeltas24H 纯函数：由整点快照序列算 [末行−2880, 末行] 的计数器差分。
+// 端点由 rewardStreamTailBounds 归一化（见其注释：不归一化会少算约 4%）。
+// 任一端缺失 / 不足两行 / 首尾同高 ⇒ OK=false。
+func rewardStreamDeltas24H(streams []*londobell.RewardStream) RewardStreamDeltas24H {
+	start, end, ok := rewardStreamTailBounds(streams)
+	if !ok {
+		return RewardStreamDeltas24H{}
+	}
+	var first, last *londobell.RewardStream
+	for _, s := range streams {
+		if s == nil {
+			continue
+		}
+		switch chain.Epoch(s.Epoch) {
+		case start:
+			first = s
+		case end:
+			last = s
+		}
+	}
+	if first == nil || last == nil {
 		return RewardStreamDeltas24H{}
 	}
 	miner := last.MinerMinted().Sub(first.MinerMinted())
@@ -221,46 +266,19 @@ func rewardStreamDeltas24H(streams []*londobell.RewardStream) RewardStreamDeltas
 	}
 }
 
-// rewardStreamsWindowStart 24h 窗口起点＝(T−2880) **向下取整到整点**。
+// rewardStreamsFetchStart 取数起点：比「T−2880 向下取整」再早 1 小时。
 //
-// 起点必须整点对齐：聚合器只存整点快照，请求起点若不是整点，返回的第一个快照会被推到
-// 下一个整点 ⇒ 首尾差分实际只覆盖 23 小时（实测主网 24h 档只出 23 个点，三流合计比真实
-// 24h 少约 4%：主网 2026-10-21 实测 54,187.43 vs 链上计数器 2880 epoch 差分 56,574.77，
-// 差的正好是首尾各半截未闭合的 120 epoch）。向下取整后首尾差分正好是完整 24 小时。
-func rewardStreamsWindowStart(epoch chain.Epoch) chain.Epoch {
-	return (epoch - chain.Epoch(winCountRewardWindowEpochs)).CurrentHour()
+// 多取这一小时是为了让 rewardStreamTailBounds 的左锚点（末行−2880）一定落在返回结果里：
+// 末行最坏情况是 floor(T)−120，此时末行−2880 就比 floor(T−2880) 还早 120 epoch。
+func rewardStreamsFetchStart(epoch chain.Epoch) chain.Epoch {
+	return (epoch - chain.Epoch(winCountRewardWindowEpochs)).CurrentHour() - 120
 }
 
-// rewardStreamsWindow 取首页 24h 窗口 [floor(T-2880), T] 的整点快照（end = T+1，把链头这一行也取进来）。
+// rewardStreamsWindow 取首页 24h 窗口的整点快照（end = T+1，把链头这一行也取进来）。
 // 抽出来给 GetWinCountReward / GetRewardStreamDeltas24H / GetHomeRewardStreams24H 共用，
 // 以保证首页一次请求对 aggregator 的 reward_streams 只调用一次。
 func (a IndexAclImpl) rewardStreamsWindow(ctx context.Context, epoch chain.Epoch) ([]*londobell.RewardStream, error) {
-	return a.agg.RewardStreams(ctx, rewardStreamsWindowStart(epoch), epoch.Next())
-}
-
-// rewardStreamsWindowEnd 分子（计数器差分）实际覆盖的末端＝窗口内最后一个整点快照高度。
-//
-// 差分的分子只能到最后一个**闭合**的整点，而赢票数（分母）能取到链头 ⇒ 分母多出 0~120 epoch
-// 会让「每赢票奖励」系统性偏低（最多 4%、平均 2%）。所以分母也裁到同一末端，两边同窗。
-// 末端不可信（不在窗口内 / 窗口因此短于 24h，例如上游抽取落后）时退回 T，由覆盖率守卫兜底。
-func rewardStreamsWindowEnd(epoch chain.Epoch, streams []*londobell.RewardStream) chain.Epoch {
-	start := rewardStreamsWindowStart(epoch)
-	var last chain.Epoch
-	for _, s := range streams {
-		if s == nil {
-			continue
-		}
-		if e := chain.Epoch(s.Epoch); e > last {
-			last = e
-		}
-	}
-	if last <= start || last > epoch {
-		return epoch
-	}
-	if last-start < chain.Epoch(winCountRewardWindowEpochs) {
-		return epoch
-	}
-	return last
+	return a.agg.RewardStreams(ctx, rewardStreamsFetchStart(epoch), epoch.Next())
 }
 
 // GetWinCountReward 首页「每赢票奖励」（薄封装）：先取一次 24h 奖励流快照，再交给
@@ -272,28 +290,27 @@ func (a IndexAclImpl) GetWinCountReward(ctx context.Context, epoch chain.Epoch) 
 
 // winCountRewardFromStreams 用已取好的整点快照算「每赢票奖励」（取数错误经 streamsErr 传入，不重复取数）。
 //
-// 实测口径：窗口内 Δ矿工实收 ÷ Δ赢票数，窗口＝最近 24h（2880 epoch）。
+// 实测口径：Δ矿工实收 ÷ Δ赢票数，窗口＝最近 24h（2880 epoch）。
 //   - Δ矿工实收 = f02 在两时点 MinerMinted() 之差，状态经 contract A 新接口
 //     /aggregators/reward_streams 取（节点路径 /adapter/actor 只覆盖约 1 天、边界不稳，不用）。
 //   - Δ赢票数 = PG chain.miner_win_counts 在**同一个窗口**内去重后的赢票总数。
-//   - 窗口起点＝floor(T−2880)（整点对齐，见 rewardStreamsWindowStart），末端＝分子实际覆盖到的
-//     最后一个整点快照（见 rewardStreamsWindowEnd）⇒ 分子分母严格同窗，不再有「分子 23h、分母 24h」
-//     的系统性偏差。
+//   - 窗口端点＝rewardStreamTailBounds 归一化后的 [末行−2880, 末行]：分子（计数器差分只能用
+//     整点快照）与分母**严格同窗**，既不再少算 1 小时（低 4%），也不会出现「分子 23h、分母 24h」。
 //
 // 兜底（都必须打日志，且**首页不得 500**）：
 //   - 两时点计数器缺失 / 接口失败 → 回退旧口径 ThisEpochReward/5 + WARN；
 //   - 分母为 0 → 返回 0；
 //   - 窗口高度覆盖率 < 90% → 回退旧口径 + WARN。
 func (a IndexAclImpl) winCountRewardFromStreams(ctx context.Context, epoch chain.Epoch, streams []*londobell.RewardStream, streamsErr error) (result decimal.Decimal, err error) {
-	start := rewardStreamsWindowStart(epoch)
-	end := rewardStreamsWindowEnd(epoch, streams)
-
 	minerDelta, deltaOK := minerMintedDelta(streams)
 	if streamsErr != nil || !deltaOK {
 		log.Warnf("win_count_reward: reward_streams [%d,%d) 取数失败或首尾计数器缺失 (err=%v ok=%v)，回退旧口径 ThisEpochReward/5",
-			start.Int64(), epoch.Int64(), streamsErr, deltaOK)
+			rewardStreamsFetchStart(epoch).Int64(), epoch.Int64(), streamsErr, deltaOK)
 		return a.legacyWinCountReward(ctx, epoch)
 	}
+
+	// 分母与分子同窗：起点/末端都取归一化后的端点（见 rewardStreamTailBounds）。
+	start, end, _ := rewardStreamTailBounds(streams)
 
 	sumWinCount, coveredEpochs, statsErr := a.winCountRepo.GetWinCountRewardStats(ctx, start, end)
 	if statsErr != nil {

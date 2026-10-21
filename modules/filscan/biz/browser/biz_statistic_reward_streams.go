@@ -72,9 +72,32 @@ func (s StatisticRewardStreamsBiz) RewardStreams(ctx context.Context, req filsca
 
 	resp = &filscan.RewardStreamsResponse{
 		Nv29Epoch: nv29EpochOrZero(message_detail.UpgradeSolsticeHeight.Int64()),
-		Items:     buildRewardStreamItems(snapshots),
+		Items:     trimRewardStreamItemsToSpan(buildRewardStreamItems(snapshots), chain.Epoch(current.Epoch).Int64()-it.Start().Int64()),
 	}
 	return
+}
+
+// trimRewardStreamItemsToSpan 只保留「最后 span 个 epoch」内的数据点。
+//
+// 取数起点比窗口早 1 小时（给 rewardStreamsTailBounds 留左锚点），首尾差分因此可能覆盖
+// span+120 epoch。曲线按档位算总量时不该多算这一小时 ⇒ 左端多出来的点裁掉。
+// 保证：曲线覆盖的 epoch 数 ≤ 档位跨度（24h＝2880 / 7d＝20160 / 30d＝86400）。
+func trimRewardStreamItemsToSpan(items []*filscan.RewardStreamItem, span int64) []*filscan.RewardStreamItem {
+	if len(items) == 0 || span <= 0 {
+		return items
+	}
+	last := items[len(items)-1].Epoch
+	cut := last - span
+	out := items[:0]
+	for _, it := range items {
+		if it.Epoch > cut {
+			out = append(out, it)
+		}
+	}
+	if len(out) == 0 {
+		return items
+	}
+	return out
 }
 
 // buildRewardStreamItems 把整点快照序列转成「相邻差分」序列。
