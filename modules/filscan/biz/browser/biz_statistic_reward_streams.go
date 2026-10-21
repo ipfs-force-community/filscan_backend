@@ -60,12 +60,15 @@ func (s StatisticRewardStreamsBiz) RewardStreams(ctx context.Context, req filsca
 		return
 	}
 
-	// 窗口 [floor(it.Start()), current]（左闭右开：end = current+1，把链头这一行也取进来）。
+	// 窗口 [floor(it.Start()) − 取数余量, current]（左闭右开：end = current+1，把链头这一行也取进来）。
 	//
-	// 起点必须整点对齐：聚合器只存整点快照，起点不整点时第一个快照会被推到下一个整点，
-	// 首尾差分只覆盖 23 小时（实测主网 24h 档只出 23 个点，与首页「近24h」同款偏差：
-	// 三流合计比链上 2880 epoch 计数器差分少约 4%）。floor 之后 24h 档出满 24 个点。
-	snapshots, err := s.agg.RewardStreams(ctx, it.Start().CurrentHour(), chain.Epoch(current.Epoch).Next())
+	// 起点整点对齐 + 额外提前 RewardStreamFetchMarginEpochs：
+	//   - 聚合器只存整点快照，起点不整点时第一个快照会被推到下一个整点；
+	//   - 最新一行还可能比链头落后数小时（cali 实测 240 epoch）；
+	// 两者叠加会让「末行−2880」这个左锚点取不到，曲线又缩回 23 小时（主网实测 24h 档只有
+	// 23 个点、三流合计低 4.2%）。多取的行随后由 trimRewardStreamItemsToSpan 裁掉。
+	fetchStart := it.Start().CurrentHour() - chain.Epoch(londobell.RewardStreamFetchMarginEpochs)
+	snapshots, err := s.agg.RewardStreams(ctx, fetchStart, chain.Epoch(current.Epoch).Next())
 	if err != nil {
 		return
 	}

@@ -394,6 +394,14 @@ func minerMinted(legacy, minted, burn, explicit decimal.Decimal) decimal.Decimal
 	return minted.Sub(burn).Sub(explicit)
 }
 
+// RewardStreamFetchMarginEpochs 取 /aggregators/reward_streams 时，窗口起点要**额外提前**的量（6 小时）。
+//
+// 整点快照只在实际存在的整点上返回；而「最新一行可能比链头落后数小时」（cali 2026-10-21 实测
+// 链头 4175655 时最新快照只到 4175520，落后 240 epoch；主网只落后 44）。若只按「窗口起点」去取，
+// 一旦要按「末行−2880」归一化 24h 端点（见 acl.rewardStreamTailBounds），左锚点就取不到，
+// 窗口又缩回 23 小时。提前 6 小时是给这个滞后留的余量（多几行 JSON，代价可忽略）。
+const RewardStreamFetchMarginEpochs = 720
+
 // RewardStream 是 londobell 新接口 /aggregators/reward_streams 返回的单个整点快照里的
 // 奖励流计数器（契约 A）。四个字段恒定存在：
 //   - v18 及以前：只有 TotalStoragePowerReward 有值，其余三项为 "0"；

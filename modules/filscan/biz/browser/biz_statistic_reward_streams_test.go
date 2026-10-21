@@ -197,8 +197,8 @@ func TestRewardStreamsResolvesWindow24h(t *testing.T) {
 	if err != nil {
 		t.Fatalf("调用失败: %s", err)
 	}
-	if agg.start != chain.Epoch(head-2880) || agg.end != chain.Epoch(head+1) {
-		t.Fatalf("24h 窗口错: got [%d,%d) want [%d,%d)", agg.start, agg.end, head-2880, head+1)
+	if agg.start != chain.Epoch(head-2880-720) || agg.end != chain.Epoch(head+1) {
+		t.Fatalf("24h 窗口错: got [%d,%d) want [%d,%d)", agg.start, agg.end, head-2880-720, head+1)
 	}
 	if resp.Nv29Epoch != nv29EpochOrZero(message_detail.UpgradeSolsticeHeight.Int64()) {
 		t.Fatalf("nv29_epoch 未取本仓构建常量: got %d", resp.Nv29Epoch)
@@ -217,7 +217,7 @@ func TestRewardStreamsResolvesWindow7d(t *testing.T) {
 	if _, err := biz.RewardStreams(context.Background(), filscan.RewardStreamsRequest{Interval: "7d"}); err != nil {
 		t.Fatalf("调用失败: %s", err)
 	}
-	if agg.start != chain.Epoch(head-7*2880) || agg.end != chain.Epoch(head+1) {
+	if agg.start != chain.Epoch(head-7*2880-720) || agg.end != chain.Epoch(head+1) {
 		t.Fatalf("7d 窗口错: got [%d,%d)", agg.start, agg.end)
 	}
 }
@@ -265,7 +265,7 @@ func TestRewardStreamsResolvesWindow24hHourAligned(t *testing.T) {
 	if _, err := biz.RewardStreams(context.Background(), filscan.RewardStreamsRequest{Interval: "24h"}); err != nil {
 		t.Fatalf("调用失败: %s", err)
 	}
-	const wantStart chain.Epoch = 6426960 // floor(6429887 − 2880)
+	const wantStart chain.Epoch = 6426240 // floor(6429887 − 2880) − 取数余量 720
 	if agg.start != wantStart || agg.end != chain.Epoch(head+1) {
 		t.Fatalf("24h 窗口错: got [%d,%d) want [%d,%d)", agg.start, agg.end, wantStart, head+1)
 	}
