@@ -255,3 +255,18 @@ func assertRewardStreamInvariant(t *testing.T, it *filscan.RewardStreamItem) {
 		t.Fatalf("不变式被破坏: total=%s != miner+service+burn=%s", it.Total, sum)
 	}
 }
+
+// 非整点链头：窗口起点要向下取整到整点，否则首个整点快照被推到下一小时、首尾差分只覆盖 23 小时。
+func TestRewardStreamsResolvesWindow24hHourAligned(t *testing.T) {
+	const head int64 = 6429840 + 47 // 非整点
+	agg := &fakeRewardStreamsAgg{}
+	biz := NewStatisticRewardStreamsBiz(&fakeRewardStreamsSyncer{epoch: head}, agg)
+
+	if _, err := biz.RewardStreams(context.Background(), filscan.RewardStreamsRequest{Interval: "24h"}); err != nil {
+		t.Fatalf("调用失败: %s", err)
+	}
+	const wantStart chain.Epoch = 6426960 // floor(6429887 − 2880)
+	if agg.start != wantStart || agg.end != chain.Epoch(head+1) {
+		t.Fatalf("24h 窗口错: got [%d,%d) want [%d,%d)", agg.start, agg.end, wantStart, head+1)
+	}
+}

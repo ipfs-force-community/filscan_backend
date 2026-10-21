@@ -221,12 +221,46 @@ func rewardStreamDeltas24H(streams []*londobell.RewardStream) RewardStreamDeltas
 	}
 }
 
-// rewardStreamsWindow 取首页 24h 窗口 [T-2880, T] 的整点快照（end = T+1，把链头这一行也取进来）。
+// rewardStreamsWindowStart 24h 窗口起点＝(T−2880) **向下取整到整点**。
+//
+// 起点必须整点对齐：聚合器只存整点快照，请求起点若不是整点，返回的第一个快照会被推到
+// 下一个整点 ⇒ 首尾差分实际只覆盖 23 小时（实测主网 24h 档只出 23 个点，三流合计比真实
+// 24h 少约 4%：主网 2026-10-21 实测 54,187.43 vs 链上计数器 2880 epoch 差分 56,574.77，
+// 差的正好是首尾各半截未闭合的 120 epoch）。向下取整后首尾差分正好是完整 24 小时。
+func rewardStreamsWindowStart(epoch chain.Epoch) chain.Epoch {
+	return (epoch - chain.Epoch(winCountRewardWindowEpochs)).CurrentHour()
+}
+
+// rewardStreamsWindow 取首页 24h 窗口 [floor(T-2880), T] 的整点快照（end = T+1，把链头这一行也取进来）。
 // 抽出来给 GetWinCountReward / GetRewardStreamDeltas24H / GetHomeRewardStreams24H 共用，
 // 以保证首页一次请求对 aggregator 的 reward_streams 只调用一次。
 func (a IndexAclImpl) rewardStreamsWindow(ctx context.Context, epoch chain.Epoch) ([]*londobell.RewardStream, error) {
-	start := epoch - chain.Epoch(winCountRewardWindowEpochs)
-	return a.agg.RewardStreams(ctx, start, epoch.Next())
+	return a.agg.RewardStreams(ctx, rewardStreamsWindowStart(epoch), epoch.Next())
+}
+
+// rewardStreamsWindowEnd 分子（计数器差分）实际覆盖的末端＝窗口内最后一个整点快照高度。
+//
+// 差分的分子只能到最后一个**闭合**的整点，而赢票数（分母）能取到链头 ⇒ 分母多出 0~120 epoch
+// 会让「每赢票奖励」系统性偏低（最多 4%、平均 2%）。所以分母也裁到同一末端，两边同窗。
+// 末端不可信（不在窗口内 / 窗口因此短于 24h，例如上游抽取落后）时退回 T，由覆盖率守卫兜底。
+func rewardStreamsWindowEnd(epoch chain.Epoch, streams []*londobell.RewardStream) chain.Epoch {
+	start := rewardStreamsWindowStart(epoch)
+	var last chain.Epoch
+	for _, s := range streams {
+		if s == nil {
+			continue
+		}
+		if e := chain.Epoch(s.Epoch); e > last {
+			last = e
+		}
+	}
+	if last <= start || last > epoch {
+		return epoch
+	}
+	if last-start < chain.Epoch(winCountRewardWindowEpochs) {
+		return epoch
+	}
+	return last
 }
 
 // GetWinCountReward 首页「每赢票奖励」（薄封装）：先取一次 24h 奖励流快照，再交给
@@ -239,16 +273,20 @@ func (a IndexAclImpl) GetWinCountReward(ctx context.Context, epoch chain.Epoch) 
 // winCountRewardFromStreams 用已取好的整点快照算「每赢票奖励」（取数错误经 streamsErr 传入，不重复取数）。
 //
 // 实测口径：窗口内 Δ矿工实收 ÷ Δ赢票数，窗口＝最近 24h（2880 epoch）。
-//   - Δ矿工实收 = f02 在 [T-2880, T] 两时点 MinerMinted() 之差，状态经 contract A 新接口
+//   - Δ矿工实收 = f02 在两时点 MinerMinted() 之差，状态经 contract A 新接口
 //     /aggregators/reward_streams 取（节点路径 /adapter/actor 只覆盖约 1 天、边界不稳，不用）。
-//   - Δ赢票数 = PG chain.miner_win_counts 在 [T-2880, T) 内去重后的赢票总数。
+//   - Δ赢票数 = PG chain.miner_win_counts 在**同一个窗口**内去重后的赢票总数。
+//   - 窗口起点＝floor(T−2880)（整点对齐，见 rewardStreamsWindowStart），末端＝分子实际覆盖到的
+//     最后一个整点快照（见 rewardStreamsWindowEnd）⇒ 分子分母严格同窗，不再有「分子 23h、分母 24h」
+//     的系统性偏差。
 //
 // 兜底（都必须打日志，且**首页不得 500**）：
 //   - 两时点计数器缺失 / 接口失败 → 回退旧口径 ThisEpochReward/5 + WARN；
 //   - 分母为 0 → 返回 0；
 //   - 窗口高度覆盖率 < 90% → 回退旧口径 + WARN。
 func (a IndexAclImpl) winCountRewardFromStreams(ctx context.Context, epoch chain.Epoch, streams []*londobell.RewardStream, streamsErr error) (result decimal.Decimal, err error) {
-	start := epoch - chain.Epoch(winCountRewardWindowEpochs)
+	start := rewardStreamsWindowStart(epoch)
+	end := rewardStreamsWindowEnd(epoch, streams)
 
 	minerDelta, deltaOK := minerMintedDelta(streams)
 	if streamsErr != nil || !deltaOK {
@@ -257,10 +295,10 @@ func (a IndexAclImpl) winCountRewardFromStreams(ctx context.Context, epoch chain
 		return a.legacyWinCountReward(ctx, epoch)
 	}
 
-	sumWinCount, coveredEpochs, statsErr := a.winCountRepo.GetWinCountRewardStats(ctx, start, epoch)
+	sumWinCount, coveredEpochs, statsErr := a.winCountRepo.GetWinCountRewardStats(ctx, start, end)
 	if statsErr != nil {
 		log.Warnf("win_count_reward: 读 PG chain.miner_win_counts [%d,%d) 失败: %s，回退旧口径 ThisEpochReward/5",
-			start.Int64(), epoch.Int64(), statsErr)
+			start.Int64(), end.Int64(), statsErr)
 		return a.legacyWinCountReward(ctx, epoch)
 	}
 
@@ -269,10 +307,11 @@ func (a IndexAclImpl) winCountRewardFromStreams(ctx context.Context, epoch chain
 		return decimal.Zero, nil
 	}
 
-	coverage := float64(coveredEpochs) / float64(winCountRewardWindowEpochs)
+	spanEpochs := end - start
+	coverage := float64(coveredEpochs) / float64(spanEpochs)
 	if coverage < winCountRewardMinCoverage {
 		log.Warnf("win_count_reward: 窗口赢票数高度覆盖不足 90%% [%d,%d): covered=%d/%d (%.1f%%)，回退旧口径 ThisEpochReward/5",
-			start.Int64(), epoch.Int64(), coveredEpochs, winCountRewardWindowEpochs, coverage*100)
+			start.Int64(), end.Int64(), coveredEpochs, spanEpochs, coverage*100)
 		return a.legacyWinCountReward(ctx, epoch)
 	}
 

@@ -58,10 +58,13 @@ type fakeWinCountRepo struct {
 	err     error
 
 	calls int
+	start chain.Epoch
+	end   chain.Epoch
 }
 
-func (f *fakeWinCountRepo) GetWinCountRewardStats(_ context.Context, _, _ chain.Epoch) (int64, int64, error) {
+func (f *fakeWinCountRepo) GetWinCountRewardStats(_ context.Context, start, end chain.Epoch) (int64, int64, error) {
 	f.calls++
+	f.start, f.end = start, end
 	return f.sum, f.covered, f.err
 }
 
@@ -254,5 +257,77 @@ func TestMinerMintedDelta(t *testing.T) {
 	}
 	if !delta.Equal(decimal.RequireFromString("65000000000000000000000")) {
 		t.Fatalf("差分错: %s", delta)
+	}
+}
+
+// 窗口起点必须整点对齐：链头不在整点上时也要请求到完整 24 小时。
+//
+// 聚合器只存整点快照，起点不整点时第一个快照会被推到下一个整点 ⇒ 首尾差分只覆盖 23 小时
+// （主网 2026-10-21 实测 24h 档仅 23 个点、三流合计比链上 2880 epoch 计数器差分少 4%）。
+func TestRewardStreamsWindowHourAligned(t *testing.T) {
+	agg := &fakeIndexAgg{streams: twoRealStreams()}
+	repo := &fakeWinCountRepo{sum: 100, covered: 2880}
+	a := newTestAcl(agg, &fakeIndexAdapter{}, repo)
+
+	const head chain.Epoch = 6429840 + 47 // 非整点链头
+	if _, err := a.GetWinCountReward(context.Background(), head); err != nil {
+		t.Fatalf("不应报错: %s", err)
+	}
+
+	const wantStart chain.Epoch = 6426960 // floor(6429887 − 2880) 到整点
+	if agg.start != wantStart || agg.end != head+1 {
+		t.Fatalf("取数窗口错: got [%d,%d) want [%d,%d)", agg.start, agg.end, wantStart, head+1)
+	}
+	// 分母同窗：起点同样整点对齐。本例快照 epoch（1000/1120）不在窗口内 ⇒ 末端退回链头。
+	if repo.start != wantStart || repo.end != head {
+		t.Fatalf("赢票数窗口错: got [%d,%d) want [%d,%d)", repo.start, repo.end, wantStart, head)
+	}
+}
+
+// 分母末端＝分子实际覆盖到的最后一个整点快照（分子只能用闭合整点，分母曾多算 0~120 epoch ⇒ 偏低）。
+func TestWinCountRewardWindowEndFollowsLastSnapshot(t *testing.T) {
+	const head chain.Epoch = 6429840 + 47
+	const start chain.Epoch = 6426960
+	const lastSnapshot chain.Epoch = 6429840 // 最后一个闭合整点，跨度恰好 2880
+
+	row := func(e chain.Epoch, minted int64) *londobell.RewardStream {
+		return &londobell.RewardStream{
+			Epoch:             int64(e),
+			TotalMintedReward: decimal.NewFromInt(minted),
+		}
+	}
+	agg := &fakeIndexAgg{streams: []*londobell.RewardStream{row(start, 1000), row(lastSnapshot, 2000)}}
+	repo := &fakeWinCountRepo{sum: 100, covered: 2880}
+	a := newTestAcl(agg, &fakeIndexAdapter{}, repo)
+
+	if _, err := a.GetWinCountReward(context.Background(), head); err != nil {
+		t.Fatalf("不应报错: %s", err)
+	}
+	if repo.start != start || repo.end != lastSnapshot {
+		t.Fatalf("分母窗口应与分子同窗: got [%d,%d) want [%d,%d)", repo.start, repo.end, start, lastSnapshot)
+	}
+}
+
+// 末端不可信时退回链头：最后一个快照离起点不足 24h（上游抽取落后）不能让窗口缩水。
+func TestWinCountRewardWindowEndFallsBackWhenShort(t *testing.T) {
+	const head chain.Epoch = 6429840 + 47
+	const start chain.Epoch = 6426960
+
+	row := func(e chain.Epoch, minted int64) *londobell.RewardStream {
+		return &londobell.RewardStream{
+			Epoch:             int64(e),
+			TotalMintedReward: decimal.NewFromInt(minted),
+		}
+	}
+	// 末端只到起点 + 600 epoch（不足 24h）。
+	agg := &fakeIndexAgg{streams: []*londobell.RewardStream{row(start, 1000), row(start+600, 2000)}}
+	repo := &fakeWinCountRepo{sum: 100, covered: 2880}
+	a := newTestAcl(agg, &fakeIndexAdapter{}, repo)
+
+	if _, err := a.GetWinCountReward(context.Background(), head); err != nil {
+		t.Fatalf("不应报错: %s", err)
+	}
+	if repo.end != head {
+		t.Fatalf("末端应退回链头 %d，得到 %d", head, repo.end)
 	}
 }

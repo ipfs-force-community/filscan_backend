@@ -60,8 +60,12 @@ func (s StatisticRewardStreamsBiz) RewardStreams(ctx context.Context, req filsca
 		return
 	}
 
-	// 窗口 [it.Start(), current]（左闭右开：end = current+1，把链头这一行也取进来）。
-	snapshots, err := s.agg.RewardStreams(ctx, it.Start(), chain.Epoch(current.Epoch).Next())
+	// 窗口 [floor(it.Start()), current]（左闭右开：end = current+1，把链头这一行也取进来）。
+	//
+	// 起点必须整点对齐：聚合器只存整点快照，起点不整点时第一个快照会被推到下一个整点，
+	// 首尾差分只覆盖 23 小时（实测主网 24h 档只出 23 个点，与首页「近24h」同款偏差：
+	// 三流合计比链上 2880 epoch 计数器差分少约 4%）。floor 之后 24h 档出满 24 个点。
+	snapshots, err := s.agg.RewardStreams(ctx, it.Start().CurrentHour(), chain.Epoch(current.Epoch).Next())
 	if err != nil {
 		return
 	}
