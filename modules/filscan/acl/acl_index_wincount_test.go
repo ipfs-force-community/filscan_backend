@@ -116,8 +116,8 @@ func TestGetWinCountRewardMeasuredSuccess(t *testing.T) {
 	if !got.Equal(want) {
 		t.Fatalf("实测每赢票奖励错: got %s want %s", got, want)
 	}
-	if agg.start != epoch-2880-120 || agg.end != epoch+1 {
-		t.Fatalf("取数窗口错: got [%d,%d) want [%d,%d)", agg.start, agg.end, epoch-2880-120, epoch+1)
+	if agg.start != epoch-2880-720 || agg.end != epoch+1 {
+		t.Fatalf("取数窗口错: got [%d,%d) want [%d,%d)", agg.start, agg.end, epoch-2880-720, epoch+1)
 	}
 	// 分母与分子同窗：端点＝归一化后的 [末行−2880, 末行]（本例链头恰在整点，故等于请求窗口末端）。
 	if repo.start != 6426960 || repo.end != 6429840 {
@@ -315,11 +315,12 @@ func TestRewardStreamTailBoundsShortSeriesFallsBack(t *testing.T) {
 
 // 非整点链头：取数起点要 floor 到整点再往前 1 小时（保证「末行−2880」那行在结果里）。
 func TestRewardStreamsFetchStartAligned(t *testing.T) {
-	if got, want := rewardStreamsFetchStart(6429887), chain.Epoch(6426840); got != want {
+	// 非整点链头：floor(T−2880) 再往前 6 小时（余量要能吃掉快照落后链头的数小时）。
+	if got, want := rewardStreamsFetchStart(6429887), chain.Epoch(6426240); got != want {
 		t.Fatalf("取数起点错: got %d want %d", got, want)
 	}
-	// 整点链头同样往前 1 小时，末行退到 floor−120 时仍有左锚点。
-	if got, want := rewardStreamsFetchStart(6429840), chain.Epoch(6426840); got != want {
+	// 整点链头同理。
+	if got, want := rewardStreamsFetchStart(6429840), chain.Epoch(6426240); got != want {
 		t.Fatalf("整点链头取数起点错: got %d want %d", got, want)
 	}
 }

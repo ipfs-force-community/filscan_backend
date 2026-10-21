@@ -135,8 +135,8 @@ func TestGetHomeRewardStreams24HSingleAggCall(t *testing.T) {
 	if agg.calls != 1 {
 		t.Fatalf("首页一次请求对 reward_streams 必须只调 1 次，实际 %d 次", agg.calls)
 	}
-	if agg.start != epoch-2880-120 || agg.end != epoch+1 {
-		t.Fatalf("取数窗口错: got [%d,%d) want [%d,%d)", agg.start, agg.end, epoch-2880-120, epoch+1)
+	if agg.start != epoch-2880-720 || agg.end != epoch+1 {
+		t.Fatalf("取数窗口错: got [%d,%d) want [%d,%d)", agg.start, agg.end, epoch-2880-720, epoch+1)
 	}
 	// 400e18 atto / 100 = 4e18 atto。
 	if !wc.Equal(decimal.RequireFromString("4000000000000000000")) {

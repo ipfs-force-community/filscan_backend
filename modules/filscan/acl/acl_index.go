@@ -266,12 +266,15 @@ func rewardStreamDeltas24H(streams []*londobell.RewardStream) RewardStreamDeltas
 	}
 }
 
-// rewardStreamsFetchStart 取数起点：比「T−2880 向下取整」再早 1 小时。
+// rewardStreamsFetchStart 取数起点：比「T−2880 向下取整」再早 rewardStreamsFetchMargin 小时。
 //
-// 多取这一小时是为了让 rewardStreamTailBounds 的左锚点（末行−2880）一定落在返回结果里：
-// 末行最坏情况是 floor(T)−120，此时末行−2880 就比 floor(T−2880) 还早 120 epoch。
+// 多取这几小时是为了让 rewardStreamTailBounds 的左锚点（末行−2880）一定落在返回结果里。
+// 余量不能只留 1 小时：整点快照的**最新一行可能比链头落后数小时**（cali 2026-10-21 实测
+// 链头 4175655 时最新快照只到 4175520，落后 240 epoch；主网当时只落后 44）。余量不足会拿不到
+// 左锚点、退回首行，跨度又掉回 2660 左右。
 func rewardStreamsFetchStart(epoch chain.Epoch) chain.Epoch {
-	return (epoch - chain.Epoch(winCountRewardWindowEpochs)).CurrentHour() - 120
+	const marginHours = 6
+	return (epoch - chain.Epoch(winCountRewardWindowEpochs)).CurrentHour() - marginHours*120
 }
 
 // rewardStreamsWindow 取首页 24h 窗口的整点快照（end = T+1，把链头这一行也取进来）。
