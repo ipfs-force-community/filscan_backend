@@ -457,7 +457,14 @@ func (b BlockChainAclImpl) GetBlockDetails(ctx context.Context, cid string) (blo
 			// 页面按空值渲染 + 留 WARN——整页 500 更糟（线上主力是爬虫，每天 3000+ 次），
 			// 而 WARN 里带 epoch/miner/lag，数据缺口仍然可查。
 			lag, lagErr := b.epochsBehindHead(ctx, block.Epoch)
-			log.Warnf("block %s (epoch %d, miner %s, lag %d, lagErr %v) missing reward/wincount, render zero-filled", cid, block.Epoch, block.Miner, lag, lagErr)
+			winIds := make([]string, 0, 5)
+			for _, wc := range blockWinCount {
+				if wc != nil && len(winIds) < 5 {
+					winIds = append(winIds, wc.Id)
+				}
+			}
+			log.Warnf("block %s (epoch %d, miner %s, lag %d, lagErr %v) missing reward/wincount, render zero-filled (rewardRows=%d winRows=%d winIds=%v)",
+				cid, block.Epoch, block.Miner, lag, lagErr, len(blockReward), len(blockWinCount), winIds)
 			if reward == nil {
 				reward = &londobell.MinerBlockReward{}
 			}
