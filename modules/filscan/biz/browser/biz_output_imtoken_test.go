@@ -49,6 +49,9 @@ type fakeIMTokenAgg struct {
 	parentCalls map[int64]int
 	parentFees  map[int64]decimal.Decimal
 	parentErr   error
+
+	blockHeaders  map[int64][]*londobell.BlockHeader
+	blockMessages map[string][]*londobell.MessageTrace
 }
 
 func newFakeIMTokenAgg() *fakeIMTokenAgg {
@@ -59,6 +62,9 @@ func newFakeIMTokenAgg() *fakeIMTokenAgg {
 		parentCalls: map[int64]int{},
 		parentFees:  map[int64]decimal.Decimal{},
 		traces:      map[string]*londobell.MessageTrace{},
+
+		blockHeaders:  map[int64][]*londobell.BlockHeader{},
+		blockMessages: map[string][]*londobell.MessageTrace{},
 	}
 }
 

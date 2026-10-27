@@ -41,10 +41,13 @@ func (b BlockChainInfo) MinersBlockRewardToBlockBasic(source *londobell.BlockHea
 func (b BlockChainInfo) ToBlockDetails(cid string, block *londobell.BlockHeader, reward *londobell.MinerBlockReward, winCount *londobell.MinerWinCount, parent *londobell.ParentTipset) (target *filscan.BlockDetails) {
 	minedReward := reward.TotalBlockReward.Sub(winCount.TotalGasReward)
 	var ticketValue string
-	if block.Ticket.VRFProof.Binary != nil {
-		ticketValue = block.Ticket.VRFProof.Binary.Base64
-	} else {
-		ticketValue = block.Ticket.VRFProof.Data
+	// VRFProof 可能缺失（聚合器只回基础字段时）⇒ 直接解引用会 panic 成 500
+	if block.Ticket.VRFProof != nil {
+		if block.Ticket.VRFProof.Binary != nil {
+			ticketValue = block.Ticket.VRFProof.Binary.Base64
+		} else {
+			ticketValue = block.Ticket.VRFProof.Data
+		}
 	}
 	target = &filscan.BlockDetails{
 		BlockBasic: filscan.BlockBasic{

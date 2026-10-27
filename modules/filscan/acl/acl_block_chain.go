@@ -16,6 +16,8 @@ import (
 	message_detail "gitlab.forceup.in/fil-data-factory/filscan-backend/pkg/chain/upgrader/message_detail"
 	"gitlab.forceup.in/fil-data-factory/filscan-backend/pkg/redis"
 
+	"github.com/gozelle/mix"
+	cidlib "github.com/ipfs/go-cid"
 	"github.com/minio/blake2b-simd"
 	"github.com/shopspring/decimal"
 	filscan "gitlab.forceup.in/fil-data-factory/filscan-backend/api"
@@ -147,11 +149,15 @@ func (b BlockChainAclImpl) GetTipsetDetail(ctx context.Context, height int64) (t
 		mapBlockCids[bs[i].BlockCid] = bs[i]
 	}
 	for _, block := range blocks {
-		if _, ok := mapBlockCids[block.ID]; !ok {
-			return nil, fmt.Errorf("block cid not matched")
-		}
-		for i := range mapBlockCids[block.ID].Messages {
-			mapMessageCid[mapBlockCids[block.ID].Messages[i]] = struct{}{}
+		blockMessages, ok := mapBlockCids[block.ID]
+		if !ok || blockMessages == nil {
+			// 链头几个块的消息索引可能还没落库：整页 500 不如按「暂无消息」渲染，
+			// 但必须留 WARN，别把索引缺失藏起来（线上 16 次/天，全在链头）。
+			log.Warnf("tipset detail: no indexed messages for block %s at epoch %d", block.ID, block.Epoch)
+		} else {
+			for _, messageCid := range blockMessages.Messages {
+				mapMessageCid[messageCid] = struct{}{}
+			}
 		}
 		for _, reward := range blocksReward {
 			if reward.Id.Epoch == block.Epoch && reward.Id.Miner == block.Miner {
@@ -346,6 +352,9 @@ func (b BlockChainAclImpl) GetLatestBlockList(ctx context.Context, filters types
 }
 
 func (b BlockChainAclImpl) getMinTicketBlock(blockList []*londobell.BlockHeader) *londobell.BlockHeader {
+	if len(blockList) == 0 {
+		return nil
+	}
 	minBlock := blockList[0]
 
 	for _, block := range blockList[1:] {
@@ -358,13 +367,29 @@ func (b BlockChainAclImpl) getMinTicketBlock(blockList []*londobell.BlockHeader)
 	return minBlock
 }
 
+// HeadRewardLagEpochs 是「链头附近允许奖励数据还没算出来」的窗口（30 epoch ≈ 15 分钟）。
+// 超出该窗口仍缺奖励数据，说明计算链路有问题，必须继续报错，不能静默补零。
+const HeadRewardLagEpochs = 30
+
+// epochsBehindHead 返回给定 epoch 落后链头多少个 epoch。
+func (b BlockChainAclImpl) epochsBehindHead(ctx context.Context, epoch int64) (int64, error) {
+	tipset, err := b.agg.LatestTipset(ctx)
+	if err != nil {
+		return 0, err
+	}
+	if len(tipset) == 0 || tipset[0] == nil {
+		return 0, fmt.Errorf("latest tipset is empty")
+	}
+	return tipset[0].ID - epoch, nil
+}
+
 func (b BlockChainAclImpl) GetBlockDetails(ctx context.Context, cid string) (blockDetails *filscan.BlockDetails, err error) {
 	blockList, err := b.agg.BlockHeaderByCid(ctx, cid)
 	if err != nil {
 		return
 	}
 	var block *londobell.BlockHeader
-	if blockList != nil {
+	if len(blockList) > 0 {
 		block = blockList[0]
 		startEpoch := chain.Epoch(block.Epoch)
 		endEpoch := startEpoch.Next()
@@ -392,16 +417,37 @@ func (b BlockChainAclImpl) GetBlockDetails(ctx context.Context, cid string) (blo
 		var reward *londobell.MinerBlockReward
 		var parent *londobell.ParentTipset
 		var winCount *londobell.MinerWinCount
-		if parentTipset == nil {
-			parent = &londobell.ParentTipset{}
-		} else {
+		if len(parentTipset) > 0 {
 			parent = parentTipset[0]
-		}
-		if blockReward != nil && blockWinCount != nil {
-			reward = blockReward[0]
-			winCount = blockWinCount[0]
 		} else {
-			return nil, fmt.Errorf("no reward or wincount found")
+			parent = &londobell.ParentTipset{}
+		}
+		if len(blockReward) > 0 {
+			reward = blockReward[0]
+		}
+		// /aggregators/wincount 返回的是「该 epoch 每个矿工一行」，按取 [0] 会把别的矿工的
+		// 出块数与手续费奖励显示到当前块上（线上抓到的真实缺陷）⇒ 必须按矿工匹配。
+		for _, wc := range blockWinCount {
+			if wc != nil && wc.Id == block.Miner {
+				winCount = wc
+				break
+			}
+		}
+		if reward == nil || winCount == nil {
+			// 链头新块的奖励要等计算任务跑完才有。链头附近按「还没算出来」渲染空值，
+			// 老块缺数据仍按错误处理（别把数据缺口藏起来）。
+			lag, lagErr := b.epochsBehindHead(ctx, block.Epoch)
+			if lagErr == nil && lag >= 0 && lag <= HeadRewardLagEpochs {
+				log.Warnf("block %s (epoch %d, lag %d) has no reward/wincount yet, render zero-filled", cid, block.Epoch, lag)
+				if reward == nil {
+					reward = &londobell.MinerBlockReward{}
+				}
+				if winCount == nil {
+					winCount = &londobell.MinerWinCount{}
+				}
+			} else {
+				return nil, fmt.Errorf("no reward or wincount found")
+			}
 		}
 		var convert assembler.BlockChainInfo
 		blockDetails = convert.ToBlockDetails(cid, block, reward, winCount, parent)
@@ -416,7 +462,7 @@ func (b BlockChainAclImpl) GetMessagesByBlock(ctx context.Context, cid string, f
 		return
 	}
 	var block *londobell.BlockHeader
-	if blockList != nil {
+	if len(blockList) > 0 {
 		block = blockList[0]
 		start := chain.Epoch(block.Epoch)
 		filters.Start = &start
@@ -529,31 +575,46 @@ func (b BlockChainAclImpl) GetMessageDetails(ctx context.Context, cid string) (m
 	if err != nil {
 		return
 	}
-	if messageList == nil {
+	if len(messageList) == 0 {
 		messageList, err = b.agg.TraceForMessage(ctx, cid)
 		if err != nil {
 			return
 		}
-		if messageList == nil {
-			filters := types.Filters{}
-			var pendingMessageList *londobell.MessagePool
-			pendingMessageList, err = b.agg.MessagePool(ctx, cid, &filters)
-			if err != nil {
-				return
-			}
-			var pendingMessage *londobell.PendingMessage
-			if pendingMessageList != nil {
-				pendingMessage = pendingMessageList.PendingMessage[0]
+	}
+	if len(messageList) > 0 && messageList[0] != nil {
+		message = messageList[0]
+	} else {
+		// 未上链消息走内存池兜底。注意：聚合器的 mpool 查询按「首个参数当地址」用，
+		// 传 cid 进去不会过滤，会返回最新一条 pending 消息 ⇒ 必须自己核对 cid，
+		// 否则任意 cid（甚至伪造 cid）都会拿到别人的消息（线上实测复现）。
+		var pendingMessageList *londobell.MessagePool
+		filters := types.Filters{}
+		pendingMessageList, err = b.agg.MessagePool(ctx, cid, &filters)
+		if err != nil {
+			// pending 消息解析失败（例如该消息 gas 字段还是空串）属「查不到」，
+			// 不能把 500 抛给调用方（线上每天 ~80 次）。
+			log.Warnf("message pool lookup for %s failed: %s", cid, err)
+			return nil, mix.Codef(404, "message not found: %s", cid)
+		}
+		if pendingMessageList != nil {
+			requestedCid, requestedErr := cidlib.Decode(cid)
+			for _, pendingMessage := range pendingMessageList.PendingMessage {
+				if pendingMessage == nil || requestedErr != nil {
+					continue
+				}
+				// 用 cid 值比较（而不是字符串比较），避免客户端换了 base 编码就查不到
+				if !pendingMessage.Cid.Equals(requestedCid) {
+					continue
+				}
 				hash = pendingMessage.Hash
 				var convert assembler.BlockChainInfo
 				message = convert.PendingMessageToMessageTrace(pendingMessage)
-			} else {
-				return
+				break
 			}
 		}
-	}
-	if messageList != nil {
-		message = messageList[0]
+		if message == nil {
+			return nil, mix.Codef(404, "message not found: %s", cid)
+		}
 	}
 
 	blocksForMessage, err := b.agg.BlocksForMessage(ctx, cid)
@@ -585,7 +646,7 @@ func (b BlockChainAclImpl) GetMessageDetails(ctx context.Context, cid string) (m
 		return nil, err
 	}
 	var baseFee decimal.Decimal
-	if tipset != nil {
+	if len(tipset) > 0 && tipset[0] != nil {
 		baseFee = tipset[0].BaseFee
 	}
 

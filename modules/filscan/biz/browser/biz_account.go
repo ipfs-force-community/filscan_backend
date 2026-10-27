@@ -101,7 +101,10 @@ func (a AccountBiz) accountBasicByID(ctx context.Context, address chain.SmartAdd
 			var ethAddress string
 			ethAddress, err = TransferToETHAddress(address.Address())
 			if err != nil {
-				return
+				// eth 地址是可选派生字段：f1/f3 这类地址本来就映射不出 eth 地址，
+				// 不能让整个账户查询 500（线上「invalid Filecoin Eth address」每天 ~700 次）。
+				log.Warnf("derive eth address for %s failed: %s", address.Address(), err)
+				err = nil
 			}
 			if ethAddress != "" {
 				accountBasic.EthAddress = ethAddress
@@ -135,20 +138,24 @@ func (a AccountBiz) accountBasicByID(ctx context.Context, address chain.SmartAdd
 			var ethAddress string
 			ethAddress, err = TransferToETHAddress(accountBasic.AccountAddress)
 			if err != nil {
-				return
+				// 同上的可选派生字段：失败降级为空，不让整页 500
+				log.Warnf("derive eth address for %s failed: %s", accountBasic.AccountAddress, err)
+				err = nil
 			}
 			accountBasic.EthAddress = ethAddress
 		} else {
 			accountBasic.AccountAddress = chain.SmartAddress(actorAddress.RobustAddress).Address()
 			accountBasic.EthAddress, err = TransferToETHAddress(accountBasic.AccountID)
 			if err != nil {
-				return nil, 0, err
+				log.Warnf("derive eth address for %s failed: %s", accountBasic.AccountID, err)
+				accountBasic.EthAddress, err = "", nil
 			}
 		}
 	} else {
 		accountBasic.EthAddress, err = TransferToETHAddress(accountBasic.AccountID)
 		if err != nil {
-			return nil, 0, err
+			log.Warnf("derive eth address for %s failed: %s", accountBasic.AccountID, err)
+			accountBasic.EthAddress, err = "", nil
 		}
 	}
 	accountID := chain.SmartAddress(accountBasic.AccountID)
@@ -223,7 +230,12 @@ func (a AccountBiz) AccountInfoByID(ctx context.Context, req filscan.AccountInfo
 	var filAddress chain.SmartAddress
 	tempFilAddress, err := CheckETHAddress(req.AccountID)
 	if err != nil {
-		return
+		// 0x 形态但映射不出 Filecoin 地址 ⇒ 请求参数问题，不能当 500（线上每天约 700 次，
+		// 全来自单个扫描器；500 既污染错误率又会被当成服务故障告警）。
+		return resp, mix.Codef(400, "invalid eth address: %s", req.AccountID)
+	}
+	if !chain.SmartAddress(req.AccountID).IsValid() && tempFilAddress == "" {
+		return resp, mix.Codef(400, "invalid address: %s", req.AccountID)
 	}
 	if tempFilAddress != "" {
 		filAddress = chain.SmartAddress(tempFilAddress)
@@ -497,7 +509,12 @@ func (a AccountBiz) IndicatorsByAccountID(ctx context.Context, req filscan.Indic
 	var filAddress chain.SmartAddress
 	tempFilAddress, err := CheckETHAddress(req.AccountID)
 	if err != nil {
-		return
+		// 0x 形态但映射不出 Filecoin 地址 ⇒ 请求参数问题，不能当 500（线上每天约 700 次，
+		// 全来自单个扫描器；500 既污染错误率又会被当成服务故障告警）。
+		return resp, mix.Codef(400, "invalid eth address: %s", req.AccountID)
+	}
+	if !chain.SmartAddress(req.AccountID).IsValid() && tempFilAddress == "" {
+		return resp, mix.Codef(400, "invalid address: %s", req.AccountID)
 	}
 	if tempFilAddress != "" {
 		filAddress = chain.SmartAddress(tempFilAddress)
@@ -596,7 +613,12 @@ func (a AccountBiz) BalanceTrendByAccountID(ctx context.Context, req filscan.Bal
 	var filAddress chain.SmartAddress
 	tempFilAddress, err := CheckETHAddress(req.AccountID)
 	if err != nil {
-		return
+		// 0x 形态但映射不出 Filecoin 地址 ⇒ 请求参数问题，不能当 500（线上每天约 700 次，
+		// 全来自单个扫描器；500 既污染错误率又会被当成服务故障告警）。
+		return resp, mix.Codef(400, "invalid eth address: %s", req.AccountID)
+	}
+	if !chain.SmartAddress(req.AccountID).IsValid() && tempFilAddress == "" {
+		return resp, mix.Codef(400, "invalid address: %s", req.AccountID)
 	}
 	if tempFilAddress != "" {
 		filAddress = chain.SmartAddress(tempFilAddress)
@@ -688,7 +710,12 @@ func (a AccountBiz) PowerTrendByAccountID(ctx context.Context, req filscan.Power
 	var filAddress chain.SmartAddress
 	tempFilAddress, err := CheckETHAddress(req.AccountID)
 	if err != nil {
-		return
+		// 0x 形态但映射不出 Filecoin 地址 ⇒ 请求参数问题，不能当 500（线上每天约 700 次，
+		// 全来自单个扫描器；500 既污染错误率又会被当成服务故障告警）。
+		return resp, mix.Codef(400, "invalid eth address: %s", req.AccountID)
+	}
+	if !chain.SmartAddress(req.AccountID).IsValid() && tempFilAddress == "" {
+		return resp, mix.Codef(400, "invalid address: %s", req.AccountID)
 	}
 	if tempFilAddress != "" {
 		filAddress = chain.SmartAddress(tempFilAddress)
@@ -758,7 +785,12 @@ func (a AccountBiz) BlocksByAccountID(ctx context.Context, req filscan.BlocksByA
 	var filAddress chain.SmartAddress
 	tempFilAddress, err := CheckETHAddress(req.AccountID)
 	if err != nil {
-		return
+		// 0x 形态但映射不出 Filecoin 地址 ⇒ 请求参数问题，不能当 500（线上每天约 700 次，
+		// 全来自单个扫描器；500 既污染错误率又会被当成服务故障告警）。
+		return resp, mix.Codef(400, "invalid eth address: %s", req.AccountID)
+	}
+	if !chain.SmartAddress(req.AccountID).IsValid() && tempFilAddress == "" {
+		return resp, mix.Codef(400, "invalid address: %s", req.AccountID)
 	}
 	if tempFilAddress != "" {
 		filAddress = chain.SmartAddress(tempFilAddress)

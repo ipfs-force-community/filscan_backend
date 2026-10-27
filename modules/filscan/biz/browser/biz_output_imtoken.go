@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/gozelle/async/parallel"
+	"github.com/gozelle/mix"
 	"github.com/hashicorp/golang-lru/v2/expirable"
 	"github.com/shopspring/decimal"
 	filscan "gitlab.forceup.in/fil-data-factory/filscan-backend/api"
@@ -53,8 +54,9 @@ func (i IMTokenBiz) MessageByEpoch(ctx context.Context, req filscan.MessageListR
 		return
 	}
 	if int64(req.Epoch) > finalHeight[0].ID {
-		err = fmt.Errorf("epoch exceed current latest height")
-		return
+		// 查询超前于链头高度属请求参数问题（线上每天 3000+ 次，客户端会拿 head+1 轮询）：
+		// 用 400 语义回给调用方，避免把「你问得太早」记成服务端 500。
+		return resp, mix.Codef(400, "epoch exceed current latest height: %d > %d", req.Epoch, finalHeight[0].ID)
 	}
 
 	blocks, err := i.agg.BlockHeader(ctx, types.Filters{
@@ -82,14 +84,17 @@ func (i IMTokenBiz) MessageByEpoch(ctx context.Context, req filscan.MessageListR
 	var messageResult []*filscan.MessageIMToken
 	var baseFee decimal.Decimal
 	if len(blocks) != 0 {
-		tipset, err := i.agg.ParentTipset(ctx, chain.Epoch(blocks[0].Epoch+1))
-		if err != nil {
-			return resp, err
+		tipset, parentErr := i.agg.ParentTipset(ctx, chain.Epoch(blocks[0].Epoch+1))
+		if parentErr != nil {
+			return resp, parentErr
 		}
-		baseFee = tipset[0].BaseFee
+		if len(tipset) > 0 && tipset[0] != nil {
+			baseFee = tipset[0].BaseFee
+		}
 	}
-	var runners []parallel.Runner[[]*londobell.MessageTrace]
 	duplicateMap := make(map[string]struct{})
+	var cidOrder []string
+	cidEpoch := make(map[string]int64)
 	for _, block := range blocks {
 		var blockMessages []*londobell.MessageTrace
 		blockMessages, err = i.agg.MessagesForBlock(ctx, block.ID, types.Filters{})
@@ -97,42 +102,39 @@ func (i IMTokenBiz) MessageByEpoch(ctx context.Context, req filscan.MessageListR
 			return
 		}
 		for _, message := range blockMessages {
-			if filterTypeMap[message.Method] {
-				if _, ok := duplicateMap[message.Cid]; !ok {
-					duplicateMap[message.Cid] = struct{}{}
-					cid := message.Cid
-					runners = append(runners, func(_ context.Context) ([]*londobell.MessageTrace, error) {
-						return i.agg.TraceForMessage(ctx, cid)
-					})
-				}
+			if message == nil || !filterTypeMap[message.Method] {
+				continue
 			}
+			if _, ok := duplicateMap[message.Cid]; ok {
+				continue
+			}
+			duplicateMap[message.Cid] = struct{}{}
+			cidOrder = append(cidOrder, message.Cid)
+			cidEpoch[message.Cid] = int64(block.Epoch)
 		}
 	}
-	ch := parallel.Run[[]*londobell.MessageTrace](ctx, 10, runners)
-	err = parallel.Wait[[]*londobell.MessageTrace](ch, func(v []*londobell.MessageTrace) error {
-		var res []*filscan.MessageIMToken
-		for _, trace := range v {
-			tk := assembler.IMToken{}.MessageToIMToken(trace, baseFee)
-			if tk.To[1] == '0' {
-				actorState, err := i.adapter.Actor(ctx, chain.SmartAddress(tk.To), nil)
-				if err != nil {
-					return err
-				}
-				tk.To = actorState.ActorAddr
-			} else if tk.From[1] == '0' {
-				actorState, err := i.adapter.Actor(ctx, chain.SmartAddress(tk.From), nil)
-				if err != nil {
-					return err
-				}
-				tk.From = actorState.ActorAddr
-			}
-			res = append(res, tk)
-		}
-		messageResult = append(messageResult, res...)
-		return nil
-	})
+	// 一个 epoch 的消息全在同一个 epoch 里：批量取 trace + 命中不可变缓存，不再逐条查
+	// （旧写法每条消息一次下游调用；且 tk.To[1] 在短地址上会越界 panic）。
+	traces, err := i.imTokenTraces(ctx, cidOrder, cidEpoch)
 	if err != nil {
-		return
+		return resp, err
+	}
+	resolved, err := i.imTokenResolveActors(ctx, traces)
+	if err != nil {
+		return resp, err
+	}
+	for _, cid := range cidOrder {
+		cached, ok := traces[cid]
+		if !ok || cached == nil {
+			continue
+		}
+		trace := *cached // 可能来自缓存，下面会改写 From/To
+		imTokenApplyActorAddress(&trace, resolved)
+		tk := assembler.IMToken{}.MessageToIMToken(&trace, baseFee)
+		if tk == nil {
+			continue
+		}
+		messageResult = append(messageResult, tk)
 	}
 	resp = filscan.MessageListResponse{
 		MessageList: assembler.IMToken{}.MessageListToIMToken(messageResult),
