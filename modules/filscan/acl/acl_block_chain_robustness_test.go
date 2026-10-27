@@ -2,11 +2,9 @@ package acl
 
 import (
 	"context"
-	"errors"
 	"strings"
 	"testing"
 
-	"github.com/gozelle/mix"
 	"github.com/ipfs/go-cid"
 	"github.com/shopspring/decimal"
 	"gitlab.forceup.in/fil-data-factory/filscan-backend/pkg/chain"
@@ -18,14 +16,15 @@ import (
 // 一旦被调用就 panic——这样测例不会偷偷依赖没打桩的下游。
 type fakeBlockChainAgg struct {
 	AggBlockChainAcl
-	block     *londobell.BlockHeader
-	rewards   []*londobell.MinerBlockReward
-	winCounts []*londobell.MinerWinCount
-	latest    int64
-	traces    []*londobell.MessageTrace
-	children  []*londobell.MessageTrace
-	pool      *londobell.MessagePool
-	poolErr   error
+	block        *londobell.BlockHeader
+	rewards      []*londobell.MinerBlockReward
+	winCounts    []*londobell.MinerWinCount
+	latest       int64
+	traces       []*londobell.MessageTrace
+	children     []*londobell.MessageTrace
+	pool         *londobell.MessagePool
+	poolErr      error
+	epochRewards []*londobell.MinersBlockReward
 }
 
 func (f *fakeBlockChainAgg) BlockHeaderByCid(ctx context.Context, id string) ([]*londobell.BlockHeader, error) {
@@ -37,6 +36,10 @@ func (f *fakeBlockChainAgg) BlockHeaderByCid(ctx context.Context, id string) ([]
 
 func (f *fakeBlockChainAgg) MinerBlockReward(ctx context.Context, addr chain.SmartAddress, filter types.Filters) ([]*londobell.MinerBlockReward, error) {
 	return f.rewards, nil
+}
+
+func (f *fakeBlockChainAgg) MinersBlockReward(ctx context.Context, start chain.Epoch, end chain.Epoch) ([]*londobell.MinersBlockReward, error) {
+	return f.epochRewards, nil
 }
 
 func (f *fakeBlockChainAgg) WinCount(ctx context.Context, start chain.Epoch, end chain.Epoch) ([]*londobell.MinerWinCount, error) {
@@ -126,9 +129,10 @@ func TestGetBlockDetails_HeadBlockMissingRewardIsZeroFilled(t *testing.T) {
 	}
 }
 
-// TestGetBlockDetails_OldBlockWithoutRewardIsNotFound 老块没有奖励行 ⇒ 基本是孤块/回滚块：
-// 按 not found 回 4xx（爬虫会停止重试），不能再记 500。
-func TestGetBlockDetails_OldBlockWithoutRewardIsNotFound(t *testing.T) {
+// TestGetBlockDetails_OldBlockWithoutRewardIsZeroFilled 极老 epoch 的奖励索引可能查不到
+// （实测 epoch 2587374 / 矿工 0142720：按 epoch 的聚合有行、按矿工的查询为空），
+// 这种块仍然要出页面——按空值渲染 + WARN，不能再 500 或 404。
+func TestGetBlockDetails_OldBlockWithoutRewardIsZeroFilled(t *testing.T) {
 	agg := &fakeBlockChainAgg{
 		latest: 5000,
 		block:  &londobell.BlockHeader{ID: "bafyold", Epoch: 100, Miner: "01001"},
@@ -136,18 +140,40 @@ func TestGetBlockDetails_OldBlockWithoutRewardIsNotFound(t *testing.T) {
 	b := BlockChainAclImpl{agg: agg}
 
 	details, err := b.GetBlockDetails(context.Background(), "bafyold")
-	if err == nil || details != nil {
-		t.Fatalf("老块无奖励行应返回 not found，得到 details=%+v err=%v", details, err)
+	if err != nil {
+		t.Fatalf("老块缺奖励也不应报错，得到: %v", err)
 	}
-	var warn *mix.Warn
-	if !errors.As(err, &warn) {
-		t.Fatalf("期望客户端错误类型 *mix.Warn，得到 %T: %v", err, err)
+	if details == nil {
+		t.Fatal("details 为 nil：老块仍应出页面")
 	}
-	if warn.Code != 404 {
-		t.Fatalf("错误码 = %d, want 404", warn.Code)
+	if !details.BlockBasic.Reward.IsZero() || details.WinCount != 0 {
+		t.Fatalf("期望零值渲染，得到 reward=%s winCount=%d", details.BlockBasic.Reward, details.WinCount)
 	}
-	if !strings.Contains(warn.Message, "block not found") {
-		t.Fatalf("错误信息不对: %s", warn.Message)
+}
+
+// TestGetBlockDetails_FallsBackToEpochRewards 按矿工查不到奖励时，回退到按 epoch 的聚合，
+// 把该矿工那一行捡回来（否则页面会显示 0 奖励）。
+func TestGetBlockDetails_FallsBackToEpochRewards(t *testing.T) {
+	agg := &fakeBlockChainAgg{
+		latest: 100,
+		block:  &londobell.BlockHeader{ID: "bafyfallback", Epoch: 100, Miner: "0142720"},
+		// 按矿工的查询返回空
+		epochRewards: []*londobell.MinersBlockReward{
+			{Id: londobell.EpochMiner{Epoch: 100, Miner: "01423801"}, TotalBlockReward: decimal.NewFromInt(999), BlockCount: 1},
+			{Id: londobell.EpochMiner{Epoch: 100, Miner: "0142720"}, TotalBlockReward: decimal.NewFromInt(555), BlockCount: 1},
+		},
+		winCounts: []*londobell.MinerWinCount{
+			{Id: "0142720", TotalWinCount: 1, TotalGasReward: decimal.NewFromInt(5)},
+		},
+	}
+	b := BlockChainAclImpl{agg: agg}
+
+	details, err := b.GetBlockDetails(context.Background(), "bafyfallback")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !details.BlockBasic.Reward.Equal(decimal.NewFromInt(555)) {
+		t.Fatalf("reward = %s, want 555（应回退到按 epoch 的聚合里本矿工那一行）", details.BlockBasic.Reward)
 	}
 }
 

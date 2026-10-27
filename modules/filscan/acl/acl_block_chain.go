@@ -404,6 +404,25 @@ func (b BlockChainAclImpl) GetBlockDetails(ctx context.Context, cid string) (blo
 		if err != nil {
 			return
 		}
+		if len(blockReward) == 0 {
+			// 极老 epoch 上「按矿工」的奖励查询会返回空，而「按 epoch」的聚合有行
+			// （实测 epoch 2587374 / 矿工 0142720：plural 有行、singular 空）。
+			// 回退一次，别把有效块判成没有奖励数据。
+			var epochRewards []*londobell.MinersBlockReward
+			epochRewards, err = b.agg.MinersBlockReward(ctx, startEpoch, endEpoch)
+			if err != nil {
+				return
+			}
+			for _, row := range epochRewards {
+				if row != nil && row.Id.Epoch == block.Epoch && row.Id.Miner == block.Miner {
+					blockReward = []*londobell.MinerBlockReward{{
+						TotalBlockReward: row.TotalBlockReward,
+						BlockCount:       row.BlockCount,
+					}}
+					break
+				}
+			}
+		}
 		var blockWinCount []*londobell.MinerWinCount
 		blockWinCount, err = b.agg.WinCount(ctx, chain.Epoch(block.Epoch), chain.Epoch(block.Epoch+1))
 		if err != nil {
@@ -434,25 +453,16 @@ func (b BlockChainAclImpl) GetBlockDetails(ctx context.Context, cid string) (blo
 			}
 		}
 		if reward == nil || winCount == nil {
-			// 两种情况必须分开：
-			// a) 链头附近（含比聚合器最新 tipset 还新 1-2 个 epoch）：奖励还没算出来，
-			//    按空值渲染 + WARN（线上主力是爬虫，500 会让整页挂掉）。
-			// b) 更老的块没有奖励行：主链块的奖励行必然存在（抽样 10 个 epoch 全命中），
-			//    所以这类基本是孤块/回滚块 ⇒ 按 not found 回 4xx，让爬虫停止重试，
-			//    同时留 WARN 便于复盘，别再记 500。
+			// 块存在但奖励/出块数取不到：可能是链头还没算出来，也可能是极老 epoch 的索引缺失。
+			// 页面按空值渲染 + 留 WARN——整页 500 更糟（线上主力是爬虫，每天 3000+ 次），
+			// 而 WARN 里带 epoch/miner/lag，数据缺口仍然可查。
 			lag, lagErr := b.epochsBehindHead(ctx, block.Epoch)
-			nearHead := lagErr != nil || (lag >= -2 && lag <= HeadRewardLagEpochs)
-			if nearHead {
-				log.Warnf("block %s (epoch %d, lag %d) has no reward/wincount yet, render zero-filled", cid, block.Epoch, lag)
-				if reward == nil {
-					reward = &londobell.MinerBlockReward{}
-				}
-				if winCount == nil {
-					winCount = &londobell.MinerWinCount{}
-				}
-			} else {
-				log.Warnf("block %s (epoch %d, lag %d) has no reward/wincount rows, treat as orphan/not-found", cid, block.Epoch, lag)
-				return nil, mix.Codef(404, "block not found: %s", cid)
+			log.Warnf("block %s (epoch %d, miner %s, lag %d, lagErr %v) missing reward/wincount, render zero-filled", cid, block.Epoch, block.Miner, lag, lagErr)
+			if reward == nil {
+				reward = &londobell.MinerBlockReward{}
+			}
+			if winCount == nil {
+				winCount = &londobell.MinerWinCount{}
 			}
 		}
 		var convert assembler.BlockChainInfo
