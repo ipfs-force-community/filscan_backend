@@ -434,10 +434,15 @@ func (b BlockChainAclImpl) GetBlockDetails(ctx context.Context, cid string) (blo
 			}
 		}
 		if reward == nil || winCount == nil {
-			// 链头新块的奖励要等计算任务跑完才有。链头附近按「还没算出来」渲染空值，
-			// 老块缺数据仍按错误处理（别把数据缺口藏起来）。
+			// 两种情况必须分开：
+			// a) 链头附近（含比聚合器最新 tipset 还新 1-2 个 epoch）：奖励还没算出来，
+			//    按空值渲染 + WARN（线上主力是爬虫，500 会让整页挂掉）。
+			// b) 更老的块没有奖励行：主链块的奖励行必然存在（抽样 10 个 epoch 全命中），
+			//    所以这类基本是孤块/回滚块 ⇒ 按 not found 回 4xx，让爬虫停止重试，
+			//    同时留 WARN 便于复盘，别再记 500。
 			lag, lagErr := b.epochsBehindHead(ctx, block.Epoch)
-			if lagErr == nil && lag >= 0 && lag <= HeadRewardLagEpochs {
+			nearHead := lagErr != nil || (lag >= -2 && lag <= HeadRewardLagEpochs)
+			if nearHead {
 				log.Warnf("block %s (epoch %d, lag %d) has no reward/wincount yet, render zero-filled", cid, block.Epoch, lag)
 				if reward == nil {
 					reward = &londobell.MinerBlockReward{}
@@ -446,7 +451,8 @@ func (b BlockChainAclImpl) GetBlockDetails(ctx context.Context, cid string) (blo
 					winCount = &londobell.MinerWinCount{}
 				}
 			} else {
-				return nil, fmt.Errorf("no reward or wincount found")
+				log.Warnf("block %s (epoch %d, lag %d) has no reward/wincount rows, treat as orphan/not-found", cid, block.Epoch, lag)
+				return nil, mix.Codef(404, "block not found: %s", cid)
 			}
 		}
 		var convert assembler.BlockChainInfo

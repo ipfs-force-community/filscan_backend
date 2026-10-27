@@ -2,9 +2,11 @@ package acl
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 
+	"github.com/gozelle/mix"
 	"github.com/ipfs/go-cid"
 	"github.com/shopspring/decimal"
 	"gitlab.forceup.in/fil-data-factory/filscan-backend/pkg/chain"
@@ -124,21 +126,28 @@ func TestGetBlockDetails_HeadBlockMissingRewardIsZeroFilled(t *testing.T) {
 	}
 }
 
-// TestGetBlockDetails_OldBlockMissingRewardStillErrors 老块缺奖励说明计算链路有问题，
-// 必须继续报错，不能静默补零掩盖数据缺口。
-func TestGetBlockDetails_OldBlockMissingRewardStillErrors(t *testing.T) {
+// TestGetBlockDetails_OldBlockWithoutRewardIsNotFound 老块没有奖励行 ⇒ 基本是孤块/回滚块：
+// 按 not found 回 4xx（爬虫会停止重试），不能再记 500。
+func TestGetBlockDetails_OldBlockWithoutRewardIsNotFound(t *testing.T) {
 	agg := &fakeBlockChainAgg{
 		latest: 5000,
 		block:  &londobell.BlockHeader{ID: "bafyold", Epoch: 100, Miner: "01001"},
 	}
 	b := BlockChainAclImpl{agg: agg}
 
-	_, err := b.GetBlockDetails(context.Background(), "bafyold")
-	if err == nil {
-		t.Fatal("老块缺奖励应报错")
+	details, err := b.GetBlockDetails(context.Background(), "bafyold")
+	if err == nil || details != nil {
+		t.Fatalf("老块无奖励行应返回 not found，得到 details=%+v err=%v", details, err)
 	}
-	if !strings.Contains(err.Error(), "no reward or wincount found") {
-		t.Fatalf("错误信息不对: %v", err)
+	var warn *mix.Warn
+	if !errors.As(err, &warn) {
+		t.Fatalf("期望客户端错误类型 *mix.Warn，得到 %T: %v", err, err)
+	}
+	if warn.Code != 404 {
+		t.Fatalf("错误码 = %d, want 404", warn.Code)
+	}
+	if !strings.Contains(warn.Message, "block not found") {
+		t.Fatalf("错误信息不对: %s", warn.Message)
 	}
 }
 
