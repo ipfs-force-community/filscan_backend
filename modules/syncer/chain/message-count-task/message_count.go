@@ -63,12 +63,19 @@ func (b MessageCountTask) Exec(ctx *syncer.Context) (err error) {
 	}
 	
 	blocks := int64(len(blockHeaders))
-	
+	// Empty() 判的是 Tipset() 非空，而 blockHeaders 来自另一个端点 blockheader；
+	// 聚合器两集合索引不一致时可能拿到空列表 ⇒ 直接除会整数除零 panic，
+	// 被 recover 转成 error 后该高度永久重试卡批。无区块就记 0。
+	var avgBlockMessage int64
+	if blocks > 0 {
+		avgBlockMessage = blockMessage / blocks
+	}
+
 	item := &po.MessageCount{
 		Epoch:           ctx.Epoch().Int64(),
 		Message:         messageCount,
 		Block:           blocks,
-		AvgBlockMessage: blockMessage / blocks,
+		AvgBlockMessage: avgBlockMessage,
 	}
 	
 	err = b.save(ctx.Context(), item)
