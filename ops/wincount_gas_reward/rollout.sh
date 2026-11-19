@@ -36,6 +36,8 @@ MIGRATION_SQL="${MIGRATION_SQL:-$OPS_DIR/36.miner_win_counts_gas_reward.sql}"
 PREFLIGHT_SQL="$OPS_DIR/01_preflight.sql"
 BACKFILL_SH="$OPS_DIR/backfill.sh"
 VALIDATE_SQL="$OPS_DIR/03_validate.sql"
+NORMALIZE_SQL="$OPS_DIR/05_normalize_negatives.sql"
+VALIDATE_AFTER_SQL="$OPS_DIR/06_validate_after_normalize.sql"
 
 SYNCER_SVC="filscan-syncer"
 API_SVC="filscan-api"
@@ -239,13 +241,24 @@ step_backfill() {
   note "正式回填（分批：每批 $MAX_PARTITIONS 个分区、批内 sleep ${SLEEP}s）"
   "$BACKFILL_SH" --yes --max-partitions "$MAX_PARTITIONS" --sleep "$SLEEP" $extra || die "回填批次失败（可中断/可续跑：重跑本步即可）"
 
-  log "③ 校验：negative_rows 必须 0"
+  log "③ 回填后体检（此时 negative_rows 非 0 属正常，不能直接当失败）"
   "$PSQL" -At -F'|' -f "$VALIDATE_SQL" > "$RUN_DIR/validate.$TS.txt" 2>&1 || die "校验脚本失败（见 $RUN_DIR/validate.$TS.txt）"
   local negrows
   negrows="$(awk -F'|' 'NF==5 && $5+0>0 {n++} END{print n+0}' "$RUN_DIR/validate.$TS.txt")"
-  note "negative_rows>0 的分区数=$negrows（期望 0；非 0 = penalty>0 或奖励 actor 余额不足，需人工核对聚合器）"
-  [ "$negrows" = "0" ] || die "出现负值分区 —— 停，不要开 ④；用 filscan-agg-parity 核对那批高度"
-  ok "回填完成且校验通过（明细：$RUN_DIR/validate.$TS.txt）"
+  # 03_validate.sql:38-43：回填刚结束时负值正常（98.6% 是 -1 取整边界、1.4% 是 ≤-2 真偏差），
+  # 必须先跑 05 归一化、再用 06 的硬断言收口；此处只记录，不 die。
+  note "归一化前 negative_rows>0 的分区数=$negrows（回填后非 0 属正常，见 03_validate.sql:38-43）"
+
+  log "③b 负值归一化（必做，顺序固定：先 05 再 06）"
+  [ -f "$NORMALIZE_SQL" ] || die "缺少 $NORMALIZE_SQL"
+  [ -f "$VALIDATE_AFTER_SQL" ] || die "缺少 $VALIDATE_AFTER_SQL"
+  "$PSQL" -At -F'|' -v ON_ERROR_STOP=1 -f "$NORMALIZE_SQL" > "$RUN_DIR/normalize.$TS.txt" 2>&1 \
+    || die "负值归一化失败（见 $RUN_DIR/normalize.$TS.txt）"
+  "$PSQL" -At -F'|' -v ON_ERROR_STOP=1 -f "$VALIDATE_AFTER_SQL" > "$RUN_DIR/validate_after.$TS.txt" 2>&1 \
+    || die "归一化后硬断言失败（见 $RUN_DIR/validate_after.$TS.txt）"
+  grep -q 'ASSERT OK: negative_rows=0' "$RUN_DIR/validate_after.$TS.txt" \
+    || die "归一化后仍有负值分区 —— 停，不要开 ④（见 $RUN_DIR/validate_after.$TS.txt）"
+  ok "回填 + 归一化完成且校验通过（明细：$RUN_DIR/validate.$TS.txt, $RUN_DIR/validate_after.$TS.txt）"
 }
 
 # ---------------------------------------------------------------- ④ config
